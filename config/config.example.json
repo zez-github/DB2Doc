@@ -1,0 +1,10 @@
+{
+  "ai": {
+    "openai": {
+      "base_url": "https://api.openai.com/v1",
+      "api_key": "YOUR_OPENAI_KEY",
+      "timeout": 30,
+      "model": "google/gemma-3-1b"
+    }
+  }
+}
