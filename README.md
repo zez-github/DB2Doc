@@ -47,3 +47,15 @@
 
 ## 许可证
 本项目使用 MIT 许可证，详见 `LICENSE`。
+
+## 示例与演示
+- 生成示例文档：`python scripts/generate_example_doc.py`（输出到 `data/examples/users_table_demo.md`）
+- 演示截图：
+  - 首页：`docs/images/HomePage.png`
+  - 生成进度：`docs/images/HomePage2.png`
+  - 查阅文档：`docs/images/Tab2.png`
+
+## 里程碑与发布
+- 规划见 `CHANGELOG.md`，首个版本：`v0.1.0`
+- GitHub 上创建里程碑（Issues → Milestones → New milestone），标题 `v0.1.0`，描述包含上述范围与目标日期
+- 将关键 Issue 关联到里程碑并设置标签（`bug`、`enhancement`、`documentation`、`good first issue`）
