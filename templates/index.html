@@ -9,955 +9,338 @@
     <link href="{{ url_for('static', filename='css/style.css') }}" rel="stylesheet">
 </head>
 <body>
-    <div class="container mt-4">
-        <div class="row">
-            <div class="col-12">
-                <!-- 页面标题 -->
-                <div class="text-center mb-4">
-                    <h1 class="display-4">
+    <div class="w-100 h-100" id="appRoot">
+        <!-- 页面标题和切换连接按钮 -->
+        <div class="bg-light border-bottom p-3" id="appHeader">
+            <div class="d-flex justify-content-between align-items-center gap-3">
+                <div class="flex-grow-1">
+                    <h1 class="h3 mb-0">
                         <i class="fas fa-database text-primary"></i>
                         数据库文档生成器
                     </h1>
-                    <p class="lead text-muted">快速生成专业的数据库文档</p>
+                    <!-- 连接信息简化：摘要常驻，详情按需展开 -->
+                    <div class="small text-muted mt-1 d-flex align-items-center gap-2">
+                        <i class="fas fa-plug"></i>
+                        <span id="currentConnectionSummary">未连接到任何数据库</span>
+                        <button class="btn btn-sm btn-link p-0" type="button"
+                                data-bs-toggle="collapse" data-bs-target="#currentConnectionCollapse"
+                                aria-expanded="false" aria-controls="currentConnectionCollapse">
+                            详情
+                        </button>
+                    </div>
                 </div>
+                <div class="btn-group flex-shrink-0">
+                    <button type="button" class="btn btn-outline-primary" id="refreshTablesBtn" title="刷新表列表">
+                        <i class="fas fa-sync-alt"></i> 刷新表
+                    </button>
+                    <a href="/diagram" class="btn btn-outline-dark" id="openDiagramBtn" title="打开数据库关系图">
+                        <i class="fas fa-project-diagram"></i> 关系图
+                    </a>
+                    <button type="button" class="btn btn-outline-secondary" id="changeConnectionBtn">
+                        <i class="fas fa-exchange-alt"></i> 切换连接
+                    </button>
+                </div>
+            </div>
 
-                <!-- 选项卡导航 -->
-                <ul class="nav nav-tabs nav-justified mb-4" id="mainTabs" role="tablist">
-                    <li class="nav-item" role="presentation">
-                        <button class="nav-link active" id="generator-tab" data-bs-toggle="tab" data-bs-target="#generator" type="button" role="tab" aria-controls="generator" aria-selected="true">
-                            <i class="fas fa-cogs"></i>
-                            文档生成器
-                        </button>
-                    </li>
-                    <!-- <li class="nav-item" role="presentation">
-                        <button class="nav-link" id="viewer-tab" data-bs-toggle="tab" data-bs-target="#viewer" type="button" role="tab" aria-controls="viewer" aria-selected="false">
-                            <i class="fas fa-file-alt"></i>
-                            文档查看器
-                        </button>
-                    </li> -->
-                    <li class="nav-item" role="presentation">
-                        <button class="nav-link" id="db-manager-tab" data-bs-toggle="tab" data-bs-target="#db-manager" type="button" role="tab" aria-controls="db-manager" aria-selected="false">
-                            <i class="fas fa-search"></i>
-                            数据库文档管理器
-                        </button>
-                    </li>
-                    <li class="nav-item" role="presentation">
-                        <button class="nav-link" id="instructions-tab" data-bs-toggle="tab" data-bs-target="#instructions" type="button" role="tab" aria-controls="instructions" aria-selected="false">
-                            <i class="fas fa-info-circle"></i>
-                            使用说明
-                        </button>
-                    </li>
-                    <li class="nav-item" role="presentation">
-                        <button class="nav-link" id="principles-tab" data-bs-toggle="tab" data-bs-target="#principles" type="button" role="tab" aria-controls="principles" aria-selected="false">
-                            <i class="fas fa-lightbulb"></i>
-                            运行原理
-                        </button>
-                    </li>
-                </ul>
+            <div class="collapse mt-2" id="currentConnectionCollapse">
+                <div class="bg-white border rounded p-2">
+                    <div id="currentConnectionInfo" class="text-muted">
+                        <small>未连接到任何数据库</small>
+                    </div>
+                </div>
+            </div>
+            <!-- 模式导航：浏览 / 标注 / 导出 -->
+            <ul class="nav nav-tabs mt-3" id="modeTabs" role="tablist">
+                <li class="nav-item" role="presentation">
+                    <button class="nav-link active" id="modeBrowseTab" type="button" role="tab" data-mode="browse">
+                        <i class="fas fa-search"></i> 浏览
+                    </button>
+                </li>
+                <li class="nav-item" role="presentation">
+                    <button class="nav-link" id="modeAnnotateTab" type="button" role="tab" data-mode="annotate">
+                        <i class="fas fa-pen-to-square"></i> 标注
+                    </button>
+                </li>
+                <li class="nav-item" role="presentation">
+                    <button class="nav-link" id="modeExportTab" type="button" role="tab" data-mode="export">
+                        <i class="fas fa-file-export"></i> 导出
+                    </button>
+                </li>
+            </ul>
+        </div>
 
-                <!-- 选项卡内容 -->
-                <div class="tab-content" id="mainTabsContent">
-                    <!-- 数据库文档生成器选项卡 -->
-                    <div class="tab-pane fade show active" id="generator" role="tabpanel" aria-labelledby="generator-tab">
-                        <div class="card">
-                            <div class="card-header">
-                                <h3 class="card-title">
-                                    <i class="fas fa-database"></i>
-                                    数据库文档生成器
-                                </h3>
-                            </div>
-                            <div class="card-body">
-                                <!-- 数据库连接配置 -->
-                                <form id="dbConfigForm">
-                                    <!-- 连接历史选择器 -->
-                                    <div class="row mb-3">
-                                        <div class="col-md-8">
-                                            <label for="connectionHistory" class="form-label">
-                                                <i class="fas fa-history"></i> 连接历史
-                                            </label>
-                                            <select class="form-select" id="connectionHistory" name="connectionHistory">
-                                                <option value="">选择已保存的连接...</option>
-                                            </select>
-                                        </div>
-                                        <div class="col-md-4 d-flex align-items-end">
-                                            <button type="button" class="btn btn-outline-danger btn-sm me-2" id="deleteConnectionBtn" disabled>
-                                                <i class="fas fa-trash"></i> 删除
-                                            </button>
-                                            <button type="button" class="btn btn-outline-secondary btn-sm" id="clearFormBtn">
-                                                <i class="fas fa-eraser"></i> 清空表单
-                                            </button>
-                                        </div>
-                                    </div>
-                                    <div class="row mb-3">
-                                        <div class="col-md-4">
-                                            <label for="dbType" class="form-label">数据库类型</label>
-                                            <select class="form-select" id="dbType" name="dbType" required>
-                                                <option value="mysql" selected>MySQL</option>
-                                                <option value="sqlserver">SQL Server</option>
-                                            </select>
-                                        </div>
-                                        <div class="col-md-4">
-                                            <label for="host" class="form-label">数据库主机</label>
-                                            <input type="text" class="form-control" id="host" name="host" value="192.168.1.20" required>
-                                        </div>
-                                        <div class="col-md-4">
-                                            <label for="port" class="form-label">端口</label>
-                                            <input type="number" class="form-control" id="port" name="port" value="3308" required>
-                                        </div>
-                                    </div>
-                                    <div class="row mb-3">
-                                        <div class="col-md-6">
-                                            <label for="user" class="form-label">用户名</label>
-                                            <input type="text" class="form-control" id="user" name="user" value="root" required>
-                                        </div>
-                                        <div class="col-md-6">
-                                            <label for="password" class="form-label">密码</label>
-                                            <input type="password" class="form-control" id="password" name="password" value="123456" required>
-                                        </div>
-                                    </div>
-                                    <div class="row mb-3">
-                                        <div class="col-md-6">
-                                            <label for="database" class="form-label">数据库名</label>
-                                            <input type="text" class="form-control" id="database" name="database" list="databaseOptions" placeholder="输入或选择数据库名" required>
-                                            <!-- 测试连接成功后显示可选择的数据库列表 -->
-                                            <div id="databaseListContainer" class="mt-2">
-                                                <datalist id="databaseOptions"></datalist>
-                                            </div>
-                                        </div>
-                                        <div class="col-md-6 d-flex align-items-end">
-                                            <button type="button" class="btn btn-outline-primary me-2" id="testConnectionBtn">
-                                                <i class="fas fa-plug"></i> 测试连接
-                                            </button>
-                                            <button type="button" class="btn btn-outline-info" id="getTablesBtn">
-                                                <i class="fas fa-table"></i> 获取表列表
-                                            </button>
-                                        </div>
-                                    </div>
-                                </form>
-
-                                <!-- 增量更新设置 -->
-                                <div id="incrementalSection" class="mt-4">
-                                    <div class="card border-info">
-                                        <div class="card-header bg-info text-white">
-                                            <h5 class="mb-0">
-                                                <i class="fas fa-sync-alt"></i> 增量更新模式
-                                            </h5>
-                                        </div>
-                                        <div class="card-body">
-                                            <div class="form-check form-switch mb-3">
-                                                <input class="form-check-input" type="checkbox" id="incrementalMode">
-                                                <label class="form-check-label" for="incrementalMode">
-                                                    <strong>启用增量更新</strong> - 基于已有文档进行更新
-                                                </label>
-                                            </div>
-                                            
-                                            <div id="existingDocSection" style="display: none;">
-                                                <div class="row mb-3">
-                                                    <div class="col-md-8">
-                                                        <label for="existingDocPath" class="form-label">
-                                                            <i class="fas fa-file-alt"></i> 选择已有数据库文档
-                                                        </label>
-                                                        <input type="text" class="form-control" id="existingDocPath" 
-                                                               placeholder="选择要更新的MD文档..." readonly>
-                                                    </div>
-                                                    <div class="col-md-4 d-flex align-items-end">
-                                                        <button type="button" class="btn btn-outline-info" id="selectDocBtn">
-                                                            <i class="fas fa-file-upload"></i> 选择文档
-                                                        </button>
-                                                    </div>
-                                                </div>
-                                                
-                                                <div id="existingTablesInfo" class="alert alert-light" style="display: none;">
-                                                    <h6><i class="fas fa-info-circle"></i> 文档信息</h6>
-                                                    <div class="row">
-                                                        <div class="col-md-6">
-                                                            <small class="text-muted">已存在表格数量：</small>
-                                                            <span id="existingTablesCount" class="badge bg-secondary">0</span>
-                                                        </div>
-                                                        <div class="col-md-6">
-                                                            <small class="text-muted">将新增表格数量：</small>
-                                                            <span id="newTablesCount" class="badge bg-success">0</span>
-                                                        </div>
-                                                    </div>
-                                                    <div class="mt-2">
-                                                        <small class="text-muted">已存在的表格：</small>
-                                                        <div id="existingTablesList" class="mt-1">
-                                                            <!-- 已存在表格列表 -->
-                                                        </div>
-                                                    </div>
-                                                </div>
-                                            </div>
-                                        </div>
-                                    </div>
-                                </div>
-
-                                <!-- 表选择区域 -->
-                                <div id="tablesSection" class="mt-4" style="display: none;">
-                                    <div class="d-flex justify-content-between align-items-center mb-3">
-                                        <h5 class="mb-0">选择要生成文档的表</h5>
-                                        <button type="button" class="btn btn-sm btn-outline-info" id="toggleTablesBtn" title="折叠/展开表列表">
-                                            <i class="fas fa-chevron-up" id="toggleTablesIcon"></i>
-                                            <span id="toggleTablesText">折叠</span>
-                                            <span class="tables-count-badge">0/0</span>
+        <!-- 三列布局主体内容 -->
+        <div class="row g-0" id="appBody" style="height: calc(100vh - 64px);">
+            <!-- 第一列 - 表列表 -->
+            <div class="col-md-3 border-end bg-white" id="leftColumn">
+                <div class="h-100 d-flex flex-column">
+                    <!-- 表列表区域 -->
+                    <div class="flex-grow-1 overflow-auto">
+                        <div class="p-3">
+                            <!-- 表选择区域 -->
+                            <div id="tablesSection" class="mt-3" style="display: none;">
+                                <div class="d-flex justify-content-between align-items-center mb-2">
+                                    <h5 class="mb-0">表列表</h5>
+                                    <div class="btn-group btn-group-sm">
+                                        <button type="button" class="btn btn-outline-secondary" id="selectAllBtn">全选</button>
+                                        <button type="button" class="btn btn-outline-secondary" id="deselectAllBtn">取消全选</button>
+                                        <button type="button" class="btn btn-outline-warning" id="selectNewOnlyBtn" style="display: none;">
+                                            <i class="fas fa-plus"></i> 仅选新表
                                         </button>
                                     </div>
-                                    <div id="tablesContent" class="tables-collapsible">
-                                        <div class="mb-3">
-                                            <button type="button" class="btn btn-sm btn-outline-secondary" id="selectAllBtn">全选</button>
-                                            <button type="button" class="btn btn-sm btn-outline-secondary" id="deselectAllBtn">取消全选</button>
-                                            <button type="button" class="btn btn-sm btn-outline-warning" id="selectNewOnlyBtn" style="display: none;">
-                                                <i class="fas fa-plus"></i> 仅选择新表格
-                                            </button>
-                                        </div>
-                                        <div id="tablesContainer" class="row">
-                                            <!-- 表格复选框将在这里动态生成 -->
-                                        </div>
+                                </div>
+                                <div class="mb-2">
+                                    <input type="text" class="form-control form-control-sm" id="tableSearch" placeholder="搜索表名...">
+                                </div>
+                                <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-2">
+                                    <div class="d-flex align-items-center gap-2 small text-muted">
+                                        <span class="legend-dot legend-dot--danger" aria-hidden="true"></span>
+                                        <span>红色=待补充说明</span>
+                                    </div>
+                                    <div class="d-flex align-items-center gap-2">
+                                        <span class="badge bg-secondary" id="tablesTotalBadge">总表 0</span>
+                                        <span class="badge bg-primary" id="tablesSelectedBadge">已选 0</span>
+                                        <span class="badge bg-danger" id="tablesMissingBadge">待补充 0</span>
                                     </div>
                                 </div>
+                                <div class="form-check form-switch mb-2">
+                                    <input class="form-check-input" type="checkbox" id="filterMissingOnly">
+                                    <label class="form-check-label small" for="filterMissingOnly">仅显示待补充</label>
+                                </div>
+                                <div id="tablesContainer" class="list-group">
+                                    <!-- 表格复选框将在这里动态生成 -->
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
 
-                                <!-- 文件保存设置 -->
-                                <div id="outputSection" class="mt-4" style="display: none;">
-                                    <h5><i class="fas fa-save"></i> 文档保存设置</h5>
-                                    <div class="row mb-3">
-                                        <div class="col-md-8">
-                                            <label for="outputPath" class="form-label">
-                                                <i class="fas fa-folder-open"></i> 文档保存路径
-                                            </label>
-                                            <input type="text" class="form-control" id="outputPath" name="outputPath" 
-                                                   placeholder="选择文档保存位置..." readonly>
-                                        </div>
-                                        <div class="col-md-4 d-flex align-items-end">
-                                            <button type="button" class="btn btn-outline-primary" id="selectPathBtn">
-                                                <i class="fas fa-folder"></i> 选择路径
-                                            </button>
-                                        </div>
-                                    </div>
-                                    <div class="row mb-3">
-                                        <div class="col-md-12">
-                                            <label for="fileName" class="form-label">
-                                                <i class="fas fa-file"></i> 文件名
-                                            </label>
-                                            <input type="text" class="form-control" id="fileName" name="fileName" 
-                                                   placeholder="将自动生成文件名..." readonly>
-                                            <div class="form-text">文件名格式：数据库名_文档_时间戳.md</div>
-                                        </div>
+            <!-- 第二列 - 表字段详情和编辑 -->
+            <div class="col-md-5 border-end bg-white middle-column">
+                <div class="h-100 d-flex flex-column">
+                    <!-- 表字段详情 -->
+                    <div class="flex-grow-1 overflow-auto p-3">
+                        <!-- 浏览模式工作区 -->
+                        <div id="browseWorkspace">
+                            <div id="tableDetailSection" style="display: none;">
+                                <div class="d-flex justify-content-between align-items-center mb-3 gap-2">
+                                    <h5 class="mb-0">
+                                        <i class="fas fa-table"></i>
+                                        <span id="currentTableName"></span> 表结构
+                                        <span id="dirtyIndicator" class="badge bg-warning text-dark ms-2" style="display:none;">未保存</span>
+                                    </h5>
+                                    <div class="btn-group">
+                                        <button type="button" class="btn btn-sm btn-outline-warning" id="nextMissingBtn" title="定位到当前表的下一处待补充">
+                                            <i class="fas fa-location-arrow"></i> 下一处
+                                        </button>
+                                        <button type="button" class="btn btn-sm btn-outline-info" id="generateMissingBtn" title="仅生成缺失的表/字段说明">
+                                            <i class="fas fa-wand-magic-sparkles"></i> 补齐缺失
+                                        </button>
+                                        <button type="button" class="btn btn-sm btn-outline-secondary" id="generateTableDescBtn">
+                                            <i class="fas fa-brain"></i> 生成表说明
+                                        </button>
+                                        <button type="button" class="btn btn-sm btn-outline-primary" id="saveTableDescBtn">
+                                            <i class="fas fa-save"></i> 保存
+                                        </button>
                                     </div>
                                 </div>
-
-                                <!-- 数据库功能介绍区域 -->
-                                <div id="dbDescriptionSection" class="mt-4" style="display: none;">
-                                    <div class="card border-primary">
-                                        <div class="card-header bg-primary text-white">
-                                            <h5 class="mb-0">
-                                                <i class="fas fa-info-circle"></i> 数据库功能介绍
-                                            </h5>
-                                        </div>
-                                        <div class="card-body">
-                                            <div class="mb-3">
-                                                <label for="dbDescription" class="form-label">
-                                                    <i class="fas fa-edit"></i> 请描述该数据库的主要功能和用途
-                                                    <small class="text-muted">（可选，但强烈推荐填写以获得更精准的字段含义推理）</small>
-                                                </label>
-                                                <textarea class="form-control" id="dbDescription" name="dbDescription" 
-                                                          rows="4" placeholder="例如：这是一个电商系统的数据库，主要用于管理用户信息、商品信息、订单处理、库存管理等功能。包含用户注册登录、商品展示、购物车、支付、物流跟踪等业务模块...">
-                                                </textarea>
-                                            </div>
-                                            <div class="alert alert-info mb-0">
-                                                <i class="fas fa-lightbulb"></i>
-                                                <strong>提示：</strong>详细的功能介绍能帮助AI更准确地推断字段含义。建议包含：
-                                                <ul class="mb-0 mt-2">
-                                                    <li>系统的主要业务领域（如电商、CRM、ERP等）</li>
-                                                    <li>核心功能模块（如用户管理、订单处理、库存管理等）</li>
-                                                    <li>特殊的业务规则或流程</li>
-                                                </ul>
-                                            </div>
-                                        </div>
-                                    </div>
+                                <div class="mb-3">
+                                    <label for="tableDescription" class="form-label">表说明</label>
+                                    <textarea class="form-control" id="tableDescription" rows="2" placeholder="请输入表的说明信息..."></textarea>
                                 </div>
-
-                                <!-- 生成按钮 -->
-                                <div class="text-center mt-4">
-                                    <button type="button" class="btn btn-success btn-lg" id="generateBtn" disabled>
-                                        <i class="fas fa-file-alt"></i> 生成DB说明文档
+                                <div class="table-responsive">
+                                    <table class="table table-striped table-hover">
+                                        <thead>
+                                            <tr>
+                                                <th>字段名</th>
+                                                <th>数据类型</th>
+                                                <th>是否为空</th>
+                                                <th>默认值</th>
+                                                <th>字段说明</th>
+                                                <th>操作</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody id="fieldsTableBody">
+                                            <!-- 字段数据将在这里动态生成 -->
+                                        </tbody>
+                                    </table>
+                                </div>
+                                <div class="mt-3 text-center">
+                                    <button type="button" class="btn btn-outline-info" id="generateAllFieldsBtn">
+                                        <i class="fas fa-brain"></i> 生成所有字段说明
                                     </button>
                                 </div>
-
-                                <!-- 进度和日志区域 -->
-                                <div id="progressSection" class="mt-4" style="display: none;">
-                                    <h5>生成进度</h5>
-                                    <!-- 总体进度 -->
-                                    <div class="mb-3">
-                                        <div class="d-flex justify-content-between align-items-center mb-2">
-                                            <span class="fw-bold">总体进度</span>
-                                            <span id="progressText" class="text-muted">0/0 已完成</span>
-                                        </div>
-                                        <div class="progress">
-                                            <div id="progressBar" class="progress-bar progress-bar-striped progress-bar-animated" 
-                                                 role="progressbar" style="width: 0%" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100">
-                                                0%
-                                            </div>
-                                        </div>
-                                    </div>
-                                    <!-- 当前处理状态 -->
-                                    <div class="mb-3">
-                                        <div class="alert alert-info" id="currentStatus" style="display: none;">
-                                            <i class="fas fa-spinner fa-spin"></i>
-                                            <span id="currentStatusText">准备开始...</span>
-                                        </div>
-                                    </div>
-                                    <div class="card">
-                                        <div class="card-header">
-                                            <h6 class="card-title mb-0">
-                                                <i class="fas fa-list-ul"></i> 执行日志
-                                            </h6>
-                                        </div>
-                                        <div class="card-body">
-                                            <div id="logsContainer" class="logs-container">
-                                                <!-- 日志将在这里显示 -->
-                                            </div>
-                                        </div>
-                                    </div>
-                                </div>
-
-                                <!-- 下载区域 -->
-                                <div id="downloadSection" class="mt-4" style="display: none;">
-                                    <div class="alert alert-success">
-                                        <i class="fas fa-check-circle"></i>
-                                        文档生成完成！
-                                    </div>
-                                    <div class="text-center">
-                                        <button type="button" class="btn btn-outline-secondary btn-lg me-3" id="previewBtn">
-                                            <i class="fas fa-eye"></i> 预览文档
-                                        </button>
-                                        <button type="button" class="btn btn-primary btn-lg" id="downloadBtn">
-                                            <i class="fas fa-download"></i> 下载文档
-                                        </button>
-                                    </div>
-                                </div>
+                            </div>
+                            <div id="noTableSelected" class="text-center text-muted d-flex flex-column justify-content-center h-100">
+                                <i class="fas fa-mouse-pointer fa-3x mb-3 opacity-50"></i>
+                                <p class="mb-0">请先连接数据库并选择一个表</p>
+                                <small>连接数据库后，从左侧选择一个表查看详情</small>
                             </div>
                         </div>
-                    </div>
 
-                    <!-- 文档查看器选项卡 -->
-                    <div class="tab-pane fade" id="viewer" role="tabpanel" aria-labelledby="viewer-tab">
-                        <div class="card">
-                            <div class="card-header">
-                                <h3 class="card-title">
-                                    <i class="fas fa-file-alt"></i>
-                                    Markdown文档查看器
-                                </h3>
-                            </div>
-                            <div class="card-body">
-                                <!-- 文件上传区域 -->
-                                <div class="row">
-                                    <div class="col-12">
-                                        <div id="dropZone" class="drop-zone">
-                                            <div class="drop-zone-content">
-                                                <i class="fas fa-cloud-upload-alt fa-3x text-primary mb-3"></i>
-                                                <h4>拖放Markdown文件到这里</h4>
-                                                <p class="text-muted">支持 .md 和 .markdown 格式文件</p>
-                                                <p class="text-muted">或者点击下面的按钮选择文件</p>
-                                                <button type="button" class="btn btn-primary" id="selectFileBtn">
-                                                    <i class="fas fa-folder-open"></i> 选择文件
-                                                </button>
-                                                <input type="file" id="fileInput" accept=".md,.markdown" style="display: none;">
-                                            </div>
-                                        </div>
-                                    </div>
-                                </div>
-
-                                <!-- 最近打开文件区域 -->
-                                <div id="recentFilesTabContainer" class="mt-3">
-                                    <div class="card border-info">
-                                        <div class="card-header bg-light">
-                                            <div class="d-flex justify-content-between align-items-center">
-                                                <h6 class="mb-0">
-                                                    <i class="fas fa-history text-info"></i>
-                                                    最近打开的文件
-                                                </h6>
-                                                <button type="button" class="btn btn-sm btn-outline-danger" id="clearHistoryBtn" title="清除所有历史记录">
-                                                    <i class="fas fa-trash"></i>
-                                                </button>
-                                            </div>
-                                        </div>
-                                        <div class="card-body p-3">
-                                            <div id="recentFilesList">
-                                                <!-- 最近打开的文件列表将在这里显示 -->
-                                            </div>
-                                            <div id="noRecentFiles" class="text-center text-muted py-3">
-                                                <i class="fas fa-folder-open fa-2x mb-2 opacity-50"></i>
-                                                <p class="mb-0">暂无最近打开的文件</p>
-                                                <small>拖放或选择MD文件后，会自动记录在这里</small>
-                                            </div>
-                                        </div>
-                                    </div>
-                                </div>
-
-                                <!-- 文件信息显示区域 -->
-                                <div id="fileInfoSection" class="mt-3" style="display: none;">
-                                    <div class="alert alert-info">
+                        <!-- 标注模式工作区（Phase1：先提供清晰入口，后续再增强为“下一处/批量补齐”流程） -->
+                        <div id="annotateWorkspace" style="display: none;">
+                            <div class="alert alert-info mb-2">
+                                <div class="d-flex justify-content-between align-items-start gap-2">
+                                    <div>
                                         <i class="fas fa-info-circle"></i>
-                                        <strong>文件信息：</strong>
-                                        <span id="fileInfo"></span>
-                                        <button type="button" class="btn btn-sm btn-outline-secondary ms-2" id="clearFileBtn">
-                                            <i class="fas fa-times"></i> 清除
+                                        标注模式：聚焦处理<strong>待补充注释</strong>的表与字段（建议左侧启用“仅显示待补充”）。
+                                    </div>
+                                    <div class="btn-group btn-group-sm">
+                                        <button type="button" class="btn btn-outline-secondary" id="annotateRefreshBtn">
+                                            <i class="fas fa-rotate"></i> 刷新
+                                        </button>
+                                        <button type="button" class="btn btn-outline-warning" id="annotateNextBtn">
+                                            <i class="fas fa-location-arrow"></i> 去下一处
+                                        </button>
+                                        <button type="button" class="btn btn-outline-success" id="annotateGenerateSaveAllBtn" title="可能需要较长时间">
+                                            <i class="fas fa-magic"></i> 一键生成并保存全部待补充
                                         </button>
                                     </div>
                                 </div>
+                            </div>
+                            <div id="annotateMissingList" class="list-group">
+                                <!-- 由前端动态填充 -->
+                            </div>
+                        </div>
 
-                                <!-- 预览区域 -->
-                                <div id="viewerPreviewSection" class="mt-4" style="display: none;">
-                                    <div class="d-flex justify-content-between align-items-center mb-3">
-                                        <h5>
-                                            <i class="fas fa-eye text-primary"></i>
-                                            文档预览
-                                        </h5>
-                                        <div class="btn-group">
-                                            <button type="button" class="btn btn-sm btn-outline-info" id="fullscreenBtn">
-                                                <i class="fas fa-expand"></i> 全屏预览
-                                            </button>
-                                            <button type="button" class="btn btn-sm btn-outline-secondary" id="copyContentBtn">
-                                                <i class="fas fa-copy"></i> 复制内容
-                                            </button>
-                                            <button type="button" class="btn btn-sm btn-outline-secondary" id="downloadContentBtn">
-                                                <i class="fas fa-download"></i> 下载文件
-                                            </button>
-                                        </div>
-                                    </div>
-                                    
-                                    <!-- 表格选项卡导航 -->
-                                    <div id="tablesTabsContainer" style="display: none;">
-                                        <ul class="nav nav-pills nav-fill mb-3" id="tablesTabs" role="tablist">
-                                            <!-- 动态生成的选项卡将在这里显示 -->
-                                        </ul>
-                                    </div>
-                                    
-                                    <div id="viewerPreviewContent" class="preview-content viewer-content">
-                                        <!-- 预览内容将在这里显示 -->
-                                    </div>
+                        <!-- 导出模式工作区：导出前的选择与校验摘要 -->
+                        <div id="exportWorkspace" style="display: none;">
+                            <div class="alert alert-light border">
+                                <div class="fw-semibold mb-1"><i class="fas fa-file-export text-primary me-1"></i> 导出摘要</div>
+                                <div class="small text-muted">
+                                    左侧勾选需要导出的表；右侧设置导出路径/增量模式，然后点击“导出DB文档”。
+                                </div>
+                                <div class="mt-2 d-flex flex-wrap gap-2">
+                                    <span class="badge bg-primary" id="exportSelectedBadge">已选 0</span>
+                                    <span class="badge bg-danger" id="exportMissingBadge">待补充 0</span>
+                                </div>
+                            </div>
+                            <div class="small text-muted">
+                                提示：导出用于保存到本地；如需把注释持久化到数据库，请在“浏览/标注”中保存表/字段注释。
+                            </div>
+                            <div class="mt-3">
+                                <div class="d-flex justify-content-between align-items-center mb-2">
+                                    <div class="fw-semibold"><i class="fas fa-clock-rotate-left text-primary me-1"></i> 导出历史</div>
+                                    <button type="button" class="btn btn-sm btn-outline-danger" id="clearExportHistoryBtn">
+                                        <i class="fas fa-trash"></i> 清空
+                                    </button>
+                                </div>
+                                <div id="exportHistoryList" class="list-group">
+                                    <!-- 由前端动态填充 -->
                                 </div>
                             </div>
                         </div>
                     </div>
+                </div>
+            </div>
 
-                    <!-- 数据库管理器选项卡 -->
-                    <div class="tab-pane fade" id="db-manager" role="tabpanel" aria-labelledby="db-manager-tab">
-                        <div class="card">
-                            <div class="card-header">
-                                <h3 class="card-title">
-                                    <i class="fas fa-search"></i>
-                                    数据库文档管理器
-                                </h3>
-                            </div>
-                            <div class="card-body p-0">
-                                <!-- 顶部工具栏 -->
-                                <div class="toolbar bg-light p-3 border-bottom">
-                                    <div class="row align-items-center">
-                                        <div class="col-md-4">
-                                            <div class="input-group">
-                                                <span class="input-group-text">
-                                                    <i class="fas fa-upload"></i>
-                                                </span>
-                                                <input type="file" class="form-control" id="dbManagerFileInput" accept=".md,.markdown" placeholder="选择数据库文档...">
-                                                <button class="btn btn-outline-secondary" type="button" id="loadDocBtn">
-                                                    <i class="fas fa-folder-open"></i> 加载文档
-                                                </button>
-                                            </div>
-                                        </div>
-                                        <div class="col-md-6">
-                                            <div class="input-group">
-                                                <span class="input-group-text">
-                                                    <i class="fas fa-search"></i>
-                                                </span>
-                                                <input type="text" class="form-control" id="globalSearchInput" placeholder="搜索表名、字段名、备注...">
-                                                <button class="btn btn-outline-secondary" type="button" id="clearSearchBtn">
-                                                    <i class="fas fa-times"></i>
-                                                </button>
-                                            </div>
-                                        </div>
-                                        <div class="col-md-2">
-                                            <div class="btn-group w-100">
-                                                <button class="btn btn-outline-info btn-sm" id="viewModeBtn" title="切换视图模式">
-                                                    <i class="fas fa-th-list"></i>
-                                                </button>
-                                                <button class="btn btn-outline-primary btn-sm" id="dbManagerFullscreenBtn" title="全屏模式">
-                                                    <i class="fas fa-expand"></i>
-                                                </button>
-                                                <button class="btn btn-outline-secondary btn-sm" id="exportBtn" title="导出结果">
-                                                    <i class="fas fa-download"></i>
-                                                </button>
-                                            </div>
-                                        </div>
-                                    </div>
-                                </div>
-
-                                <!-- 主要内容区域 - 分屏布局 -->
-                                <div class="row g-0" style="height: 600px;">
-                                    <!-- 左侧搜索面板 -->
-                                    <div class="col-md-4 border-end">
-                                        <div class="h-100 d-flex flex-column">
-                                            <!-- 搜索过滤器 -->
-                                            <div class="p-3 border-bottom bg-light">
-                                                <h6 class="mb-2">
-                                                    <i class="fas fa-filter"></i> 搜索过滤器
-                                                </h6>
-                                                <div class="form-check form-check-inline">
-                                                    <input class="form-check-input" type="checkbox" id="filterTables" checked>
-                                                    <label class="form-check-label" for="filterTables">表名</label>
-                                                </div>
-                                                <div class="form-check form-check-inline">
-                                                    <input class="form-check-input" type="checkbox" id="filterFields" checked>
-                                                    <label class="form-check-label" for="filterFields">字段名</label>
-                                                </div>
-                                                <div class="form-check form-check-inline">
-                                                    <input class="form-check-input" type="checkbox" id="filterComments" checked>
-                                                    <label class="form-check-label" for="filterComments">备注</label>
-                                                </div>
-                                            </div>
-
-                                            <!-- 搜索结果列表 -->
-                                            <div class="flex-grow-1 overflow-auto">
-                                                <div id="searchResultsList" class="list-group list-group-flush">
-                                                    <div class="text-center text-muted p-4">
-                                                        <i class="fas fa-file-upload fa-3x mb-3 opacity-50"></i>
-                                                        <p class="mb-0">请先加载数据库文档</p>
-                                                        <small>支持拖放或点击选择 .md 文件</small>
-                                                    </div>
-                                                </div>
-                                            </div>
-
-                                            <!-- 搜索统计 -->
-                                            <div class="p-2 border-top bg-light">
-                                                <small class="text-muted">
-                                                    <span id="searchStats">等待加载文档...</span>
-                                                </small>
-                                            </div>
-                                        </div>
-                                    </div>
-
-                                    <!-- 右侧详情面板 -->
-                                    <div class="col-md-8" style="height: 600px;">
-                                        <div class="h-100 d-flex flex-column">
-                                            <!-- 详情面板标题 -->
-                                            <div class="p-3 border-bottom bg-light">
-                                                <h6 class="mb-0" id="detailPanelTitle">
-                                                    <i class="fas fa-info-circle"></i> 详情信息
-                                                </h6>
-                                            </div>
-
-                                            <!-- 详情内容 -->
-                                            <div class="flex-grow-1 overflow-auto p-3">
-                                                <div id="detailPanelContent">
-                                                    <div class="text-center text-muted">
-                                                        <i class="fas fa-mouse-pointer fa-3x mb-3 opacity-50"></i>
-                                                        <p class="mb-0">点击左侧搜索结果查看详情</p>
-                                                        <small>支持查看表结构、字段信息等</small>
-                                                    </div>
-                                                </div>
-                                            </div>
-                                        </div>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
+            <!-- 第三列 - 数据库功能介绍和文档保存设置 -->
+            <div class="col-md-4 bg-white" id="rightColumn">
+                <div class="h-100 d-flex flex-column">
+                    <!-- 折叠按钮 -->
+                    <div class="d-flex justify-content-start p-1 bg-light border-bottom">
+                        <button type="button" class="btn btn-sm btn-outline-secondary" id="collapseRightBtn" title="折叠右侧面板">
+                            <i class="fas fa-chevron-right"></i>
+                        </button>
                     </div>
-
-                    <!-- 工具使用说明选项卡 -->
-                    <div class="tab-pane fade" id="instructions" role="tabpanel" aria-labelledby="instructions-tab">
-                        <div class="card">
-                            <div class="card-header">
-                                <h3 class="card-title">
-                                    <i class="fas fa-info-circle"></i>
-                                    工具使用说明
-                                </h3>
+                    <!-- 数据库功能介绍 -->
+                    <div id="dbDescriptionSection" class="p-3 border-bottom bg-light" style="display: none;">
+                        <div class="bg-white border border-primary rounded">
+                            <div class="bg-primary text-white p-2 rounded-top">
+                                <h6 class="mb-0">
+                                    <i class="fas fa-info-circle"></i> 数据库功能介绍
+                                </h6>
                             </div>
-                            <div class="card-body">
-                                <div class="row">
-                                    <div class="col-md-6">
-                                        <h5><i class="fas fa-play-circle text-success"></i> 快速开始</h5>
-                                        <div class="mb-4">
-                                            <h6 class="text-primary"><i class="fas fa-cogs me-2"></i>文档生成器使用流程</h6>
-                                            <ol class="list-unstyled">
-                                                <li><i class="fas fa-check-circle text-primary me-2"></i> <strong>填写数据库连接信息</strong>：输入数据库主机、端口、用户名、密码</li>
-                                                <li><i class="fas fa-check-circle text-primary me-2"></i> <strong>测试数据库连接</strong>：点击"测试连接"按钮确保连接正常</li>
-                                                <li><i class="fas fa-check-circle text-primary me-2"></i> <strong>获取表列表</strong>：点击"获取表列表"按钮获取数据库中的所有表</li>
-                                                <li><i class="fas fa-check-circle text-primary me-2"></i> <strong>选择目标表</strong>：勾选需要生成文档的表（支持全选/取消全选）</li>
-                                                <li><i class="fas fa-check-circle text-primary me-2"></i> <strong>生成文档</strong>：点击"生成DB说明文档"按钮开始生成</li>
-                                                <li><i class="fas fa-check-circle text-primary me-2"></i> <strong>预览/下载</strong>：点击"预览文档"查看内容，或"下载文档"获取文件</li>
-                                            </ol>
-                                        </div>
-                                        <div>
-                                            <h6 class="text-info"><i class="fas fa-file-alt me-2"></i>文档查看器使用流程</h6>
-                                            <ol class="list-unstyled">
-                                                <li><i class="fas fa-check-circle text-info me-2"></i> <strong>切换选项卡</strong>：点击"文档查看器"选项卡</li>
-                                                <li><i class="fas fa-check-circle text-info me-2"></i> <strong>拖放文件</strong>：直接将.md文件拖放到拖放区域</li>
-                                                <li><i class="fas fa-check-circle text-info me-2"></i> <strong>或点击选择</strong>：点击拖放区域或"选择文件"按钮选择文件</li>
-                                                <li><i class="fas fa-check-circle text-info me-2"></i> <strong>查看预览</strong>：文件自动渲染显示，支持表格、标题等格式</li>
-                                                <li><i class="fas fa-check-circle text-info me-2"></i> <strong>复制下载</strong>：可复制内容到剪贴板或重新下载文件</li>
-                                            </ol>
-                                        </div>
-                                    </div>
-                                    <div class="col-md-6">
-                                        <h5><i class="fas fa-star text-warning"></i> 功能特点</h5>
-                                        <ul class="list-unstyled">
-                                            <li><i class="fas fa-check text-success me-2"></i> 自动生成完整的数据库文档</li>
-                                            <li><i class="fas fa-check text-success me-2"></i> 支持表结构、字段类型、约束等信息</li>
-                                            <li><i class="fas fa-brain text-ai me-2"></i> <strong>AI字段翻译</strong>：自动生成中文说明</li>
-                                            <li><i class="fas fa-check text-success me-2"></i> 实时显示生成进度和日志</li>
-                                            <li><i class="fas fa-check text-success me-2"></i> 支持多表批量处理</li>
-                                            <li><i class="fas fa-check text-success me-2"></i> 生成标准Markdown格式文档</li>
-                                            <li><i class="fas fa-file-alt text-primary me-2"></i> <strong>文档查看器</strong>：拖放预览Markdown文件</li>
-                                            <li><i class="fas fa-check text-success me-2"></i> 界面友好，操作简单</li>
-                                        </ul>
-                                    </div>
+                            <div class="p-2">
+                                <div class="mb-2">
+                                    <label for="dbDescription" class="form-label">
+                                        <i class="fas fa-edit"></i> 请描述该数据库的主要功能和用途
+                                    </label>
+                                    <textarea class="form-control form-control-sm" id="dbDescription" name="dbDescription" 
+                                              rows="3" placeholder="例如：这是一个电商系统的数据库，主要用于管理用户信息、商品信息、订单处理、库存管理等功能...">
+                                    </textarea>
                                 </div>
-
-                                <div class="row mt-4">
-                                    <div class="col-12">
-                                        <h5><i class="fas fa-exclamation-triangle text-warning"></i> 注意事项</h5>
-                                        <div class="alert alert-warning">
-                                            <ul class="mb-0">
-                                                <li>确保数据库连接信息正确，工具需要有足够的权限访问数据库</li>
-                                                <li>生成大量表的文档可能需要较长时间，请耐心等待</li>
-                                                <li>建议在生成前先测试数据库连接，确保网络畅通</li>
-                                                <li>生成的文档为Markdown格式，可以使用各种编辑器查看和编辑</li>
-                                            </ul>
-                                        </div>
-                                    </div>
+                                <div class="mb-2">
+                                    <button type="button" class="btn btn-outline-success w-100" id="generateAllTablesBtn">
+                                        <i class="fas fa-magic"></i> 一键生成所有表和字段描述
+                                    </button>
                                 </div>
-
-                                <div class="row mt-4">
-                                    <div class="col-12">
-                                        <h5><i class="fas fa-question-circle text-info"></i> 常见问题</h5>
-                                        <div class="accordion" id="faqAccordion">
-                                            <div class="accordion-item">
-                                                <h2 class="accordion-header" id="faq1">
-                                                    <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#faq1Content" aria-expanded="false" aria-controls="faq1Content">
-                                                        连接数据库失败怎么办？
-                                                    </button>
-                                                </h2>
-                                                <div id="faq1Content" class="accordion-collapse collapse" aria-labelledby="faq1" data-bs-parent="#faqAccordion">
-                                                    <div class="accordion-body">
-                                                        请检查数据库连接信息是否正确，包括主机地址、端口、用户名、密码等。确保数据库服务正在运行，并且网络连接正常。
-                                                    </div>
-                                                </div>
-                                            </div>
-                                            <div class="accordion-item">
-                                                <h2 class="accordion-header" id="faq2">
-                                                    <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#faq2Content" aria-expanded="false" aria-controls="faq2Content">
-                                                        为什么获取不到表列表？
-                                                    </button>
-                                                </h2>
-                                                <div id="faq2Content" class="accordion-collapse collapse" aria-labelledby="faq2" data-bs-parent="#faqAccordion">
-                                                    <div class="accordion-body">
-                                                        可能是数据库名称错误，或者用户没有足够的权限查看数据库表。请确认数据库名称正确，并且用户具有SELECT权限。
-                                                    </div>
-                                                </div>
-                                            </div>
-                                            <div class="accordion-item">
-                                                <h2 class="accordion-header" id="faq3">
-                                                    <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#faq3Content" aria-expanded="false" aria-controls="faq3Content">
-                                                        生成的文档包含哪些内容？
-                                                    </button>
-                                                </h2>
-                                                <div id="faq3Content" class="accordion-collapse collapse" aria-labelledby="faq3" data-bs-parent="#faqAccordion">
-                                                    <div class="accordion-body">
-                                                        生成的文档包含表结构、字段名称、数据类型、是否为空、默认值、注释、主键、外键、索引等完整信息。
-                                                    </div>
-                                                </div>
-                                            </div>
-                                            <div class="accordion-item">
-                                                <h2 class="accordion-header" id="faq4">
-                                                    <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#faq4Content" aria-expanded="false" aria-controls="faq4Content">
-                                                        <i class="fas fa-brain text-ai me-2"></i> AI字段翻译如何使用？
-                                                    </button>
-                                                </h2>
-                                                <div id="faq4Content" class="accordion-collapse collapse" aria-labelledby="faq4" data-bs-parent="#faqAccordion">
-                                                    <div class="accordion-body">
-                                                        AI字段翻译功能会自动启用，无需额外配置。在文档生成过程中，AI会自动：
-                                                        <ul class="mt-2">
-                                                            <li>识别英文字段名称</li>
-                                                            <li>结合表名和字段名上下文</li>
-                                                            <li>生成10字以内的中文说明</li>
-                                                            <li>以JSON格式返回翻译结果</li>
-                                                        </ul>
-                                                        生成的文档会包含AI翻译的中文字段说明，帮助您更好地理解数据库字段含义。
-                                                    </div>
-                                                </div>
-                                            </div>
-                                            <div class="accordion-item">
-                                                <h2 class="accordion-header" id="faq5">
-                                                    <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#faq5Content" aria-expanded="false" aria-controls="faq5Content">
-                                                        <i class="fas fa-file-alt text-info me-2"></i> 文档查看器支持哪些文件格式？
-                                                    </button>
-                                                </h2>
-                                                <div id="faq5Content" class="accordion-collapse collapse" aria-labelledby="faq5" data-bs-parent="#faqAccordion">
-                                                    <div class="accordion-body">
-                                                        文档查看器目前支持以下格式：
-                                                        <ul class="mt-2">
-                                                            <li><strong>.md</strong> - 标准Markdown文件</li>
-                                                            <li><strong>.markdown</strong> - Markdown文件的另一种扩展名</li>
-                                                            <li><strong>文件大小限制</strong>：最大支持5MB的文件</li>
-                                                            <li><strong>编码支持</strong>：自动识别UTF-8编码</li>
-                                                        </ul>
-                                                        支持的Markdown语法包括：标题、表格、粗体、斜体、代码块、链接等常见格式。
-                                                    </div>
-                                                </div>
-                                            </div>
-                                            <div class="accordion-item">
-                                                <h2 class="accordion-header" id="faq6">
-                                                    <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#faq6Content" aria-expanded="false" aria-controls="faq6Content">
-                                                        <i class="fas fa-question-circle text-warning me-2"></i> 拖放文件不成功怎么办？
-                                                    </button>
-                                                </h2>
-                                                <div id="faq6Content" class="accordion-collapse collapse" aria-labelledby="faq6" data-bs-parent="#faqAccordion">
-                                                    <div class="accordion-body">
-                                                        如果拖放文件遇到问题，请尝试：
-                                                        <ul class="mt-2">
-                                                            <li>确保文件是.md或.markdown格式</li>
-                                                            <li>检查文件大小是否超过5MB</li>
-                                                            <li>使用"选择文件"按钮作为替代方案</li>
-                                                            <li>确保浏览器支持拖放功能（现代浏览器都支持）</li>
-                                                            <li>检查文件是否包含特殊字符或损坏</li>
-                                                        </ul>
-                                                        如果问题持续存在，建议使用点击选择文件的方式上传。
-                                                    </div>
-                                                </div>
-                                            </div>
-                                        </div>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-
-                    <!-- 工具运行原理选项卡 -->
-                    <div class="tab-pane fade" id="principles" role="tabpanel" aria-labelledby="principles-tab">
-                        <div class="card">
-                            <div class="card-header">
-                                <h3 class="card-title">
+                                <div class="alert alert-info p-2 mb-0">
                                     <i class="fas fa-lightbulb"></i>
-                                    工具运行原理
-                                </h3>
+                                    <small>详细的功能介绍能帮助AI更准确地推断字段含义</small>
+                                </div>
                             </div>
-                            <div class="card-body">
-                                <div class="row">
-                                    <div class="col-12">
-                                        <h5><i class="fas fa-code-branch text-info"></i> 技术架构</h5>
-                                        <p class="text-muted">本工具采用前后端分离架构，集成OpenAI大模型AI技术，通过Web界面与后端API交互，实现数据库文档的智能化生成。</p>
-                                        
-                                        <div class="row mt-4">
-                                            <div class="col-md-2">
-                                                <div class="card bg-light">
-                                                    <div class="card-body text-center">
-                                                        <i class="fas fa-desktop fa-2x text-primary mb-2"></i>
-                                                        <h6>前端界面</h6>
-                                                        <small class="text-muted">Bootstrap + JavaScript<br>提供用户交互界面</small>
-                                                    </div>
-                                                </div>
+                        </div>
+                    </div>
+
+                    <!-- 浏览/标注模式：持久化提示与快捷动作 -->
+                    <div id="browseAssistantSection" class="p-3 border-bottom bg-light" style="display: none;">
+                        <div class="bg-white border rounded p-3">
+                            <div class="fw-semibold mb-2">
+                                <i class="fas fa-database text-primary"></i> 持久化
+                            </div>
+                            <div class="small text-muted mb-2">
+                                “保存”会将表/字段注释写回数据库；“导出”会将已选表结构与注释导出到本地 Markdown。
+                            </div>
+                            <div class="d-grid gap-2">
+                                <button type="button" class="btn btn-outline-primary" id="assistantSaveCurrentBtn">
+                                    <i class="fas fa-save"></i> 保存当前表注释到数据库
+                                </button>
+                                <button type="button" class="btn btn-outline-success" id="assistantGoExportBtn">
+                                    <i class="fas fa-file-export"></i> 前往导出
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- 导出模式：导出/增量更新设置 -->
+                    <div id="exportAssistantSection" class="p-3 bg-light" style="display: none;">
+                        <!-- 增量更新设置（从左侧归位到导出模式） -->
+                        <div id="incrementalSection" class="mb-3">
+                            <div class="bg-white border border-info rounded">
+                                <div class="bg-info text-white p-2 rounded-top">
+                                    <h6 class="mb-0">
+                                        <i class="fas fa-sync-alt"></i> 增量更新模式
+                                    </h6>
+                                </div>
+                                <div class="p-2">
+                                    <div class="form-check form-switch mb-2">
+                                        <input class="form-check-input" type="checkbox" id="incrementalMode">
+                                        <label class="form-check-label" for="incrementalMode">
+                                            <strong>启用增量更新</strong>
+                                        </label>
+                                    </div>
+
+                                    <div id="existingDocSection" style="display: none;">
+                                        <div class="row mb-2">
+                                            <div class="col-md-12">
+                                                <label for="existingDocPath" class="form-label">
+                                                    <i class="fas fa-file-alt"></i> 选择已有文档
+                                                </label>
+                                                <input type="text" class="form-control form-control-sm" id="existingDocPath"
+                                                       placeholder="选择要更新的MD文档..." readonly>
                                             </div>
-                                            <div class="col-md-2">
-                                                <div class="card bg-light">
-                                                    <div class="card-body text-center">
-                                                        <i class="fas fa-server fa-2x text-success mb-2"></i>
-                                                        <h6>后端服务</h6>
-                                                        <small class="text-muted">Python Flask<br>处理业务逻辑</small>
-                                                    </div>
-                                                </div>
-                                            </div>
-                                            <div class="col-md-2">
-                                                <div class="card bg-gradient-ai">
-                                                    <div class="card-body text-center">
-                                                        <i class="fas fa-brain fa-2x text-ai mb-2"></i>
-                                                        <h6>OpenAI大模型</h6>
-                                                        <small class="text-white">AI字段翻译<br>中文含义推断</small>
-                                                    </div>
-                                                </div>
-                                            </div>
-                                            <div class="col-md-2">
-                                                <div class="card bg-light">
-                                                    <div class="card-body text-center">
-                                                        <i class="fas fa-database fa-2x text-warning mb-2"></i>
-                                                        <h6>数据库</h6>
-                                                        <small class="text-muted">MySQL数据库<br>存储表结构信息</small>
-                                                    </div>
-                                                </div>
-                                            </div>
-                                            <div class="col-md-2">
-                                                <div class="card bg-light border-info">
-                                                    <div class="card-body text-center">
-                                                        <i class="fas fa-file-alt fa-2x text-info mb-2"></i>
-                                                        <h6>文档查看器</h6>
-                                                        <small class="text-muted">拖放上传<br>实时预览</small>
-                                                    </div>
-                                                </div>
-                                            </div>
-                                            <div class="col-md-2">
-                                                <div class="card bg-light border-secondary">
-                                                    <div class="card-body text-center">
-                                                        <i class="fas fa-code fa-2x text-secondary mb-2"></i>
-                                                        <h6>Markdown渲染</h6>
-                                                        <small class="text-muted">HTML转换<br>样式美化</small>
-                                                    </div>
-                                                </div>
+                                        </div>
+                                        <div class="row mb-2">
+                                            <div class="col-md-12">
+                                                <button type="button" class="btn btn-sm btn-outline-info" id="selectDocBtn">
+                                                    <i class="fas fa-file-upload"></i> 选择文档
+                                                </button>
                                             </div>
                                         </div>
 
-                                        <h5 class="mt-4"><i class="fas fa-sitemap text-info"></i> 智能化工作流程</h5>
-                                        <div class="row">
-                                            <div class="col-md-6">
-                                                <div class="timeline">
-                                                    <div class="timeline-item">
-                                                        <div class="timeline-marker">1</div>
-                                                        <div class="timeline-content">
-                                                            <h6>数据库连接</h6>
-                                                            <p>使用PyMySQL连接目标数据库，验证连接参数的正确性</p>
-                                                        </div>
-                                                    </div>
-                                                    <div class="timeline-item">
-                                                        <div class="timeline-marker">2</div>
-                                                        <div class="timeline-content">
-                                                            <h6>表结构分析</h6>
-                                                            <p>执行SQL查询获取表结构、字段信息、索引、约束等元数据</p>
-                                                        </div>
-                                                    </div>
-                                                    <div class="timeline-item ai-highlight">
-                                                        <div class="timeline-marker ai-marker">AI</div>
-                                                        <div class="timeline-content">
-                                                            <h6><i class="fas fa-brain text-ai"></i> AI字段翻译</h6>
-                                                            <p>使用OpenAI大模型自动推断英文字段名的中文含义，生成易于理解的中文说明</p>
-                                                        </div>
-                                                    </div>
-                                                    <div class="timeline-item">
-                                                        <div class="timeline-marker">3</div>
-                                                        <div class="timeline-content">
-                                                            <h6>文档生成</h6>
-                                                            <p>将AI翻译结果与数据库信息结合，生成包含中文说明的Markdown文档</p>
-                                                        </div>
-                                                    </div>
+                                        <div id="existingTablesInfo" class="alert alert-light p-2" style="display: none;">
+                                            <h6><i class="fas fa-info-circle"></i> 文档信息</h6>
+                                            <div class="row">
+                                                <div class="col-md-6">
+                                                    <small class="text-muted">已存在表格数量：</small>
+                                                    <span id="existingTablesCount" class="badge bg-secondary">0</span>
                                                 </div>
-                                            </div>
-                                            <div class="col-md-6">
-                                                <div class="alert alert-info">
-                                                    <h6><i class="fas fa-info-circle"></i> 核心SQL查询</h6>
-                                                    <p class="mb-2">工具主要执行以下类型的查询：</p>
-                                                    <ul class="mb-0">
-                                                        <li><code>SHOW TABLES</code> - 获取数据库表列表</li>
-                                                        <li><code>DESCRIBE table_name</code> - 获取表结构信息</li>
-                                                        <li><code>SHOW CREATE TABLE</code> - 获取完整的表定义</li>
-                                                        <li><code>SHOW INDEX FROM table_name</code> - 获取索引信息</li>
-                                                        <li><code>SELECT * FROM INFORMATION_SCHEMA</code> - 获取元数据</li>
-                                                    </ul>
-                                                </div>
-                                                
-                                                <div class="alert alert-ai mt-3">
-                                                    <h6><i class="fas fa-brain text-ai"></i> AI智能优势</h6>
-                                                    <p class="mb-2">相比传统工具，AI增强版具有以下优势：</p>
-                                                    <ul class="mb-0">
-                                                        <li><strong>智能翻译：</strong> 将英文字段名转换为中文说明</li>
-                                                        <li><strong>上下文理解：</strong> 结合表名和字段名进行翻译</li>
-                                                        <li><strong>批量处理：</strong> 自动化处理所有选定的表</li>
-                                                        <li><strong>格式统一：</strong> 生成标准的Markdown文档格式</li>
-                                                        <li><strong>节省时间：</strong> 无需手动编写字段说明</li>
-                                                    </ul>
-                                                </div>
-                                            </div>
-                                        </div>
-
-                                        <h5 class="mt-4"><i class="fas fa-brain text-ai"></i> AI智能字段翻译</h5>
-                                        <div class="row">
-                                            <div class="col-12">
-                                                <div class="card bg-gradient-ai-light">
-                                                    <div class="card-body">
-                                                        <div class="row">
-                                                            <div class="col-md-6">
-                                                                <h6><i class="fas fa-language text-ai"></i> 智能翻译功能</h6>
-                                                                <ul class="list-unstyled">
-                                                                    <li><i class="fas fa-check-circle text-success me-2"></i> 自动识别英文字段名称</li>
-                                                                    <li><i class="fas fa-check-circle text-success me-2"></i> 智能推断字段业务含义</li>
-                                                                    <li><i class="fas fa-check-circle text-success me-2"></i> 生成准确的中文注释</li>
-                                                                    <li><i class="fas fa-check-circle text-success me-2"></i> 支持上下文理解翻译</li>
-                                                                </ul>
-                                                            </div>
-                                                            <div class="col-md-6">
-                                                                <h6><i class="fas fa-cog text-ai"></i> 技术特点</h6>
-                                                                <ul class="list-unstyled">
-                                                                    <li><i class="fas fa-check-circle text-success me-2"></i> 基于OpenAI大模型技术</li>
-                                                                    <li><i class="fas fa-check-circle text-success me-2"></i> 结合表名和字段名上下文</li>
-                                                                    <li><i class="fas fa-check-circle text-success me-2"></i> 中文注释限制10字以内</li>
-                                                                    <li><i class="fas fa-check-circle text-success me-2"></i> 自动化批量处理</li>
-                                                                </ul>
-                                                            </div>
-                                                        </div>
-                                                    </div>
-                                                </div>
-                                            </div>
-                                        </div>
-
-                                        <h5 class="mt-4"><i class="fas fa-tools text-info"></i> 技术栈详解</h5>
-                                        <div class="row">
-                                            <div class="col-md-3">
-                                                <div class="card">
-                                                    <div class="card-header">
-                                                        <h6><i class="fas fa-code"></i> 前端技术</h6>
-                                                    </div>
-                                                    <div class="card-body">
-                                                        <ul class="list-unstyled">
-                                                            <li><i class="fab fa-html5 text-danger me-2"></i> HTML5 - 页面结构</li>
-                                                            <li><i class="fab fa-css3-alt text-primary me-2"></i> CSS3 - 样式美化</li>
-                                                            <li><i class="fab fa-js-square text-warning me-2"></i> JavaScript - 交互逻辑</li>
-                                                            <li><i class="fab fa-bootstrap text-purple me-2"></i> Bootstrap 5 - 响应式框架</li>
-                                                            <li><i class="fas fa-icons text-info me-2"></i> Font Awesome - 图标库</li>
-                                                        </ul>
-                                                    </div>
-                                                </div>
-                                            </div>
-                                            <div class="col-md-3">
-                                                <div class="card">
-                                                    <div class="card-header">
-                                                        <h6><i class="fas fa-server"></i> 后端技术</h6>
-                                                    </div>
-                                                    <div class="card-body">
-                                                        <ul class="list-unstyled">
-                                                            <li><i class="fab fa-python text-primary me-2"></i> Python 3.x - 核心语言</li>
-                                                            <li><i class="fas fa-flask text-success me-2"></i> Flask - Web框架</li>
-                                                            <li><i class="fas fa-database text-warning me-2"></i> PyMySQL - 数据库连接</li>
-                                                            <li><i class="fas fa-file-code text-info me-2"></i> Jinja2 - 模板引擎</li>
-                                                            <li><i class="fas fa-cog text-secondary me-2"></i> JSON - 数据交换</li>
-                                                        </ul>
-                                                    </div>
-                                                </div>
-                                            </div>
-                                            <div class="col-md-3">
-                                                <div class="card border-ai">
-                                                    <div class="card-header bg-gradient-ai">
-                                                        <h6><i class="fas fa-brain text-white"></i> AI技术栈</h6>
-                                                    </div>
-                                                    <div class="card-body">
-                                                        <ul class="list-unstyled">
-                                                            <li><i class="fas fa-star text-ai me-2"></i> OpenAI大模型 - GPT系列</li>
-                                                            <li><i class="fas fa-language text-ai me-2"></i> 自然语言处理 - NLP</li>
-                                                            <li><i class="fas fa-code text-ai me-2"></i> openai - Python SDK</li>
-                                                            <li><i class="fas fa-comments text-ai me-2"></i> Chat Completions API</li>
-                                                            <li><i class="fas fa-cog text-ai me-2"></i> JSON格式化输出</li>
-                                                        </ul>
-                                                    </div>
-                                                </div>
-                                            </div>
-                                            <div class="col-md-3">
-                                                <div class="card border-info">
-                                                    <div class="card-header" style="background: linear-gradient(135deg, #17a2b8 0%, #138496 100%); color: white;">
-                                                        <h6><i class="fas fa-file-alt text-white"></i> 文档查看器</h6>
-                                                    </div>
-                                                    <div class="card-body">
-                                                        <ul class="list-unstyled">
-                                                            <li><i class="fas fa-upload text-info me-2"></i> 拖放上传 - Drag & Drop API</li>
-                                                            <li><i class="fas fa-file-reader text-info me-2"></i> 文件读取 - FileReader API</li>
-                                                            <li><i class="fas fa-code text-info me-2"></i> Markdown解析 - 自定义解析器</li>
-                                                            <li><i class="fas fa-eye text-info me-2"></i> 实时预览 - HTML渲染</li>
-                                                            <li><i class="fas fa-copy text-info me-2"></i> 剪贴板操作 - Clipboard API</li>
-                                                        </ul>
-                                                    </div>
+                                                <div class="col-md-6">
+                                                    <small class="text-muted">将新增表格数量：</small>
+                                                    <span id="newTablesCount" class="badge bg-success">0</span>
                                                 </div>
                                             </div>
                                         </div>
@@ -965,94 +348,140 @@
                                 </div>
                             </div>
                         </div>
-                    </div>
-                </div>
-            </div>
-        </div>
-    </div>
 
-    <!-- 加载指示器 -->
-    <div id="loadingOverlay" class="loading-overlay" style="display: none;">
-        <div class="spinner-border text-primary" role="status">
-            <span class="visually-hidden">Loading...</span>
-        </div>
-    </div>
-
-    <!-- 文档预览模态框 -->
-    <div class="modal fade" id="previewModal" tabindex="-1" aria-labelledby="previewModalLabel" aria-hidden="true">
-        <div class="modal-dialog modal-xl">
-            <div class="modal-content">
-                <div class="modal-header">
-                    <h5 class="modal-title" id="previewModalLabel">
-                        <i class="fas fa-eye text-primary"></i>
-                        文档预览
-                    </h5>
-                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
-                </div>
-                <div class="modal-body">
-                    <div id="previewLoadingIndicator" class="text-center py-4" style="display: none;">
-                        <div class="spinner-border text-primary" role="status">
-                            <span class="visually-hidden">Loading...</span>
+                        <!-- 文档保存设置 -->
+                        <div id="outputSection" style="display: none;">
+                            <h5><i class="fas fa-save"></i> 文档保存设置</h5>
+                            <div class="bg-white border rounded p-3 mt-2">
+                                <div class="mb-3">
+                                    <label for="outputPath" class="form-label">
+                                        <i class="fas fa-folder-open"></i> 文档保存路径
+                                    </label>
+                                    <input type="text" class="form-control" id="outputPath" name="outputPath"
+                                           placeholder="选择文档保存位置..." readonly>
+                                </div>
+                                <div class="mb-3">
+                                    <button type="button" class="btn btn-outline-primary" id="selectPathBtn">
+                                        <i class="fas fa-folder"></i> 选择路径
+                                    </button>
+                                </div>
+                                <div class="mb-3">
+                                    <label for="fileName" class="form-label">
+                                        <i class="fas fa-file"></i> 文件名
+                                    </label>
+                                    <input type="text" class="form-control" id="fileName" name="fileName"
+                                           placeholder="将自动生成文件名..." readonly>
+                                    <div class="form-text">文件名格式：数据库名_文档_时间戳.md</div>
+                                </div>
+                            </div>
                         </div>
-                        <p class="mt-2 text-muted">正在加载文档内容...</p>
-                    </div>
-                    <div id="previewContent" class="preview-content">
-                        <!-- 预览内容将在这里显示 -->
-                    </div>
-                </div>
-                <div class="modal-footer">
-                    <button type="button" class="btn btn-outline-info" id="fullscreenFromPreviewBtn">
-                        <i class="fas fa-expand"></i> 全屏预览
-                    </button>
-                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">关闭</button>
-                    <button type="button" class="btn btn-primary" id="downloadFromPreviewBtn">
-                        <i class="fas fa-download"></i> 下载文档
-                    </button>
-                </div>
-            </div>
-        </div>
-    </div>
 
-    <!-- 全屏预览模态框 -->
-    <div class="modal fade" id="fullscreenModal" tabindex="-1" aria-labelledby="fullscreenModalLabel" aria-hidden="true">
-        <div class="modal-dialog modal-fullscreen">
-            <div class="modal-content">
-                <div class="modal-header bg-dark text-white">
-                    <h5 class="modal-title" id="fullscreenModalLabel">
-                        <i class="fas fa-expand text-white"></i>
-                        全屏文档预览
-                    </h5>
-                    <div class="d-flex align-items-center">
-                        <button type="button" class="btn btn-sm btn-outline-light me-2" id="fullscreenCopyBtn">
-                            <i class="fas fa-copy"></i> 复制
-                        </button>
-                        <button type="button" class="btn btn-sm btn-outline-light me-2" id="fullscreenDownloadBtn">
-                            <i class="fas fa-download"></i> 下载
-                        </button>
-                        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
-                    </div>
-                </div>
-                <div class="modal-body p-0">
-                    <!-- 全屏表格选项卡导航 -->
-                    <div id="fullscreenTabsContainer" class="p-3 bg-light border-bottom" style="display: none;">
-                        <ul class="nav nav-pills nav-fill" id="fullscreenTabs" role="tablist">
-                            <!-- 动态生成的选项卡将在这里显示 -->
-                        </ul>
-                    </div>
-                    
-                    <div id="fullscreenContent" class="preview-content fullscreen-content h-100">
-                        <!-- 全屏预览内容将在这里显示 -->
+                        <!-- 生成按钮（仅导出模式显示） -->
+                        <div class="mt-3">
+                            <button type="button" class="btn btn-success btn-lg w-100" id="generateBtn" disabled>
+                                <i class="fas fa-file-alt"></i> 导出DB文档
+                            </button>
+                            <div id="generateHint" class="form-text text-muted mt-2"></div>
+                        </div>
                     </div>
                 </div>
             </div>
         </div>
+
+        <!-- 侧边助手迷你操作条：右侧默认收起时展示（常驻入口） -->
+        <div id="assistantMiniBar" class="assistant-mini-bar" style="display:none;" aria-label="侧边助手快捷操作">
+            <button type="button" class="btn btn-sm btn-outline-secondary assistant-mini-bar__btn" id="expandAssistantBtn" title="展开侧边助手">
+                <i class="fas fa-chevron-left" aria-hidden="true"></i>
+            </button>
+            <button type="button" class="btn btn-sm btn-outline-primary assistant-mini-bar__btn" id="miniSaveBtn" title="保存当前表注释到数据库">
+                <i class="fas fa-save" aria-hidden="true"></i>
+            </button>
+            <button type="button" class="btn btn-sm btn-outline-success assistant-mini-bar__btn" id="miniExportBtn" title="前往导出">
+                <i class="fas fa-file-export" aria-hidden="true"></i>
+            </button>
+        </div>
+
+        <!-- 进度和日志区域 - 底部抽屉（默认收起一行，必要时展开日志） -->
+        <div id="progressSection" class="bottom-drawer bottom-drawer--progress collapsed" style="display: none;">
+            <div class="bottom-drawer__header">
+                <div class="d-flex align-items-start justify-content-between gap-3">
+                    <div class="flex-grow-1">
+                        <div class="d-flex justify-content-between align-items-center">
+                            <div class="fw-semibold">
+                                <i class="fas fa-tasks text-primary me-2"></i>生成进度
+                            </div>
+                            <span id="progressText" class="text-muted small">0/0 已完成</span>
+                        </div>
+                        <div class="progress mt-2">
+                            <div id="progressBar" class="progress-bar" 
+                                 role="progressbar" style="width: 0%" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100">
+                                0%
+                            </div>
+                        </div>
+                        <!-- 当前处理状态（收起状态也可见） -->
+                        <div id="currentStatus" class="bottom-drawer__status mt-2" style="display: none;">
+                            <span class="spinner-border spinner-border-sm text-primary me-2" role="status" aria-hidden="true"></span>
+                            <span id="currentStatusText" class="text-muted small">准备开始...</span>
+                        </div>
+                    </div>
+                    <button type="button" class="btn btn-sm btn-outline-secondary bottom-drawer__toggle" id="toggleProgressDrawerBtn"
+                            aria-expanded="false" title="展开日志">
+                        <i class="fas fa-chevron-up" aria-hidden="true"></i>
+                    </button>
+                </div>
+            </div>
+
+            <div class="bottom-drawer__body">
+                <div class="border rounded bg-white">
+                    <div class="bg-light p-2 rounded-top">
+                        <h6 class="mb-0">
+                            <i class="fas fa-list-ul"></i> 执行日志
+                        </h6>
+                    </div>
+                    <div class="p-2 bottom-drawer__logs">
+                        <div id="logsContainer" class="logs-container">
+                            <!-- 日志将在这里显示 -->
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 下载区域 - 底部抽屉 -->
+        <div id="downloadSection" class="bottom-drawer bottom-drawer--download" style="display: none;">
+            <div class="bottom-drawer__header">
+                <div class="alert alert-success mb-0">
+                <i class="fas fa-check-circle"></i>
+                文档生成完成！
+            </div>
+            </div>
+            <div class="bottom-drawer__body text-center">
+                <div class="small text-muted mb-3">
+                    <div class="fw-semibold">文件路径</div>
+                    <div id="downloadFilePath" class="text-break"></div>
+                </div>
+                <div class="d-flex flex-wrap justify-content-center gap-2 mb-3">
+                    <button type="button" class="btn btn-outline-secondary" id="copyPathBtn">
+                        <i class="fas fa-copy"></i> 复制路径
+                    </button>
+                    <button type="button" class="btn btn-outline-secondary" id="openFolderBtn">
+                        <i class="fas fa-folder-open"></i> 打开文件夹
+                    </button>
+                    <button type="button" class="btn btn-outline-success" id="reopenExportBtn">
+                        <i class="fas fa-rotate-left"></i> 再次导出
+                    </button>
+                </div>
+                <button type="button" class="btn btn-outline-secondary btn-lg me-3" id="previewBtn">
+                    <i class="fas fa-eye"></i> 预览文档
+                </button>
+                <button type="button" class="btn btn-primary btn-lg" id="downloadBtn">
+                    <i class="fas fa-download"></i> 下载文档
+                </button>
+            </div>
+        </div>
     </div>
 
-    <!-- Toast 容器 -->
-    <div class="toast-container position-fixed top-0 end-0 p-3" style="z-index: 9999;">
-        <!-- Toast 消息将在这里动态生成 -->
-    </div>
-
+    <!-- 引入JavaScript库 -->
     <script src="{{ url_for('static', filename='lib/bootstrap/bootstrap.bundle.min.js') }}"></script>
     <script src="{{ url_for('static', filename='js/app.js') }}"></script>
 </body>

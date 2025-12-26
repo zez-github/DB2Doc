@@ -8,6 +8,18 @@ class DatabaseDocGenerator {
         this.completedTables = 0;
         this.outputPath = '';
         this.fileName = '';
+        this.tableSearchTerm = '';
+        this.missingDescTables = new Set();
+        this.tablesTotal = 0;
+
+        // 主界面模式（Phase1：浏览/标注/导出）
+        this.currentMode = 'browse';
+        this.activeTableName = '';
+        this.allTableNames = [];
+        this.tableMissingMap = new Map(); // tableName -> { missing_total, missing_columns_count, missing_table_comment }
+
+        // 标注/保存状态
+        this.dirtyTables = new Set(); // tableName -> 是否有未保存变更
         
         // 增量更新相关属性
         this.incrementalMode = false;
@@ -27,11 +39,235 @@ class DatabaseDocGenerator {
     }
 
     init() {
+        // 检查是否有当前连接
+        this.checkCurrentConnection();
+        this.initModeTabs();
         this.bindEvents();
-        this.loadSavedConfig();
-        this.loadConnectionHistory();
+        // 兼容旧版本：若方法不存在则跳过
+        if (typeof this.loadSavedConfig === 'function') this.loadSavedConfig();
+        if (typeof this.loadConnectionHistory === 'function') this.loadConnectionHistory();
         this.setDefaultOutputPath();
         this.initDatabaseManager();
+        this.initProgressDrawer();
+        this.initLayoutSizing();
+        this.setMode('browse');
+        // 默认收起右侧助手，仅保留右侧迷你入口
+        this.setRightPanelCollapsed(true);
+        this.updateGenerateButton();
+    }
+
+    setRightPanelCollapsed(collapsed) {
+        const rightColumn = document.getElementById('rightColumn');
+        const collapseRightBtn = document.getElementById('collapseRightBtn');
+        const miniBar = document.getElementById('assistantMiniBar');
+        if (!rightColumn) return;
+
+        const shouldCollapse = !!collapsed;
+        rightColumn.classList.toggle('collapsed', shouldCollapse);
+
+        // 更新折叠按钮图标/文案（若可见）
+        if (collapseRightBtn) {
+            const icon = collapseRightBtn.querySelector('i');
+            if (icon) {
+                icon.className = shouldCollapse ? 'fas fa-chevron-left' : 'fas fa-chevron-right';
+            }
+            collapseRightBtn.setAttribute('title', shouldCollapse ? '展开侧边助手' : '折叠右侧面板');
+        }
+
+        // 迷你操作条：仅在右侧收起时显示
+        if (miniBar) {
+            miniBar.style.display = shouldCollapse ? 'flex' : 'none';
+        }
+
+        // 更新中间列宽度
+        if (typeof this.updateMiddleColumnStyle === 'function') {
+            this.updateMiddleColumnStyle();
+        }
+    }
+
+    // 根据头部高度自适应主区域高度（避免写死 64px 后 Tabs 增高导致溢出）
+    initLayoutSizing() {
+        const update = () => {
+            const header = document.getElementById('appHeader');
+            const body = document.getElementById('appBody');
+            if (!header || !body) return;
+            const h = header.offsetHeight || 0;
+            body.style.height = `calc(100vh - ${h}px)`;
+        };
+        this._layoutUpdate = update;
+        update();
+        window.addEventListener('resize', update);
+
+        // 连接详情展开/收起时，头部高度会变化，需重新计算
+        const connCollapse = document.getElementById('currentConnectionCollapse');
+        if (connCollapse) {
+            connCollapse.addEventListener('shown.bs.collapse', update);
+            connCollapse.addEventListener('hidden.bs.collapse', update);
+        }
+    }
+
+    // 初始化模式Tabs（浏览/标注/导出）
+    initModeTabs() {
+        const tabs = document.querySelectorAll('#modeTabs [data-mode]');
+        if (!tabs || tabs.length === 0) return;
+        tabs.forEach(btn => {
+            btn.addEventListener('click', () => {
+                const mode = btn.getAttribute('data-mode');
+                this.setMode(mode);
+            });
+        });
+    }
+
+    // 切换主界面模式
+    setMode(mode) {
+        const nextMode = mode || 'browse';
+        this.currentMode = nextMode;
+
+        // tabs样式
+        const tabs = document.querySelectorAll('#modeTabs [data-mode]');
+        tabs.forEach(btn => {
+            btn.classList.toggle('active', btn.getAttribute('data-mode') === nextMode);
+        });
+
+        // workspace切换
+        const browse = document.getElementById('browseWorkspace');
+        const annotate = document.getElementById('annotateWorkspace');
+        const exportWs = document.getElementById('exportWorkspace');
+        if (browse) browse.style.display = nextMode === 'browse' ? 'block' : 'none';
+        if (annotate) annotate.style.display = nextMode === 'annotate' ? 'block' : 'none';
+        if (exportWs) exportWs.style.display = nextMode === 'export' ? 'block' : 'none';
+
+        // 侧边助手区块切换
+        const browseAssistant = document.getElementById('browseAssistantSection');
+        const exportAssistant = document.getElementById('exportAssistantSection');
+        if (browseAssistant) browseAssistant.style.display = (nextMode === 'browse' || nextMode === 'annotate') ? 'block' : 'none';
+        if (exportAssistant) exportAssistant.style.display = nextMode === 'export' ? 'block' : 'none';
+
+        // 导出模式才展示导出设置（避免“导出工具”心智污染浏览）
+        const outputSection = document.getElementById('outputSection');
+        if (outputSection) outputSection.style.display = nextMode === 'export' ? 'block' : 'none';
+
+        // 标注模式：默认开启“仅显示待补充”
+        if (nextMode === 'annotate') {
+            const filterMissingOnly = document.getElementById('filterMissingOnly');
+            if (filterMissingOnly) {
+                filterMissingOnly.checked = true;
+                this.applyTableFilters();
+            }
+            this.renderAnnotateMissingList();
+        }
+
+        if (nextMode === 'export') {
+            this.renderExportHistory();
+        }
+
+        // 导出摘要刷新
+        this.updateExportSummary();
+        this.updateGenerateButton();
+    }
+
+    // 简单的HTML转义（避免表名/类型包含特殊字符导致渲染问题）
+    escapeHtml(value) {
+        return String(value)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
+    }
+
+    // 生成安全的DOM id（避免表名包含空格/特殊字符导致label失效）
+    makeSafeId(value) {
+        return String(value).replace(/[^a-zA-Z0-9\-_:.]/g, '_');
+    }
+
+    // 初始化底部进度抽屉（默认收起一行）
+    initProgressDrawer() {
+        const toggleBtn = document.getElementById('toggleProgressDrawerBtn');
+        if (!toggleBtn) return;
+
+        toggleBtn.addEventListener('click', () => {
+            this.toggleProgressDrawer();
+        });
+    }
+
+    // 控制底部抽屉展开/收起
+    setProgressDrawerExpanded(expanded) {
+        const progressSection = document.getElementById('progressSection');
+        const toggleBtn = document.getElementById('toggleProgressDrawerBtn');
+        if (!progressSection || !toggleBtn) return;
+
+        if (expanded) {
+            progressSection.classList.remove('collapsed');
+            toggleBtn.setAttribute('aria-expanded', 'true');
+            toggleBtn.setAttribute('title', '收起日志');
+            // 展开后滚动到底部，方便看到最新日志
+            const logsContainer = document.getElementById('logsContainer');
+            if (logsContainer) {
+                logsContainer.scrollTop = logsContainer.scrollHeight;
+            }
+        } else {
+            progressSection.classList.add('collapsed');
+            toggleBtn.setAttribute('aria-expanded', 'false');
+            toggleBtn.setAttribute('title', '展开日志');
+        }
+    }
+
+    toggleProgressDrawer() {
+        const progressSection = document.getElementById('progressSection');
+        if (!progressSection) return;
+        const isCollapsed = progressSection.classList.contains('collapsed');
+        this.setProgressDrawerExpanded(isCollapsed);
+    }
+
+    // 进度/下载抽屉出现时，为主体预留“收起一行”的空间
+    setBottomDrawerReservedSpace(enabled) {
+        const appRoot = document.getElementById('appRoot');
+        if (!appRoot) return;
+        appRoot.classList.toggle('has-bottom-drawer', !!enabled);
+    }
+
+    // 检查当前连接
+    checkCurrentConnection() {
+        const currentConnection = sessionStorage.getItem('currentConnection');
+        if (currentConnection) {
+            this.currentConnection = JSON.parse(currentConnection);
+            // 显示当前连接信息
+            this.displayCurrentConnectionInfo();
+            // 获取表列表
+            this.getTablesList();
+        } else {
+            // 如果没有当前连接，跳转到连接管理页面
+            window.location.href = '/connections';
+        }
+    }
+
+    // 显示当前连接信息
+    displayCurrentConnectionInfo() {
+        const connectionInfoDiv = document.getElementById('currentConnectionInfo');
+        const summaryEl = document.getElementById('currentConnectionSummary');
+        if (this.currentConnection) {
+            const dbType = (this.currentConnection.db_type || '').toUpperCase();
+            const host = this.currentConnection.host || '';
+            const port = this.currentConnection.port || '';
+            const database = this.currentConnection.database || '';
+            const user = this.currentConnection.user || '';
+
+            if (summaryEl) {
+                summaryEl.textContent = `${dbType} / ${database}（${host}:${port}）`;
+                summaryEl.title = `用户: ${user}`;
+            }
+
+            if (connectionInfoDiv) connectionInfoDiv.innerHTML = `
+                <div><strong>${this.currentConnection.db_type.toUpperCase()}</strong></div>
+                <div class="small">${this.currentConnection.host}:${this.currentConnection.port}</div>
+                <div class="small">数据库: ${this.currentConnection.database}</div>
+                <div class="small">用户: ${this.currentConnection.user}</div>
+            `;
+        } else {
+            if (summaryEl) summaryEl.textContent = '未连接到任何数据库';
+            if (connectionInfoDiv) connectionInfoDiv.innerHTML = '<small>未连接到任何数据库</small>';
+        }
     }
 
     bindEvents() {
@@ -41,15 +277,18 @@ class DatabaseDocGenerator {
         }
         this.eventsbound = true;
         
-        // 测试连接按钮
-        document.getElementById('testConnectionBtn').addEventListener('click', () => {
-            this.testConnection();
-        });
-
-        // 获取表列表按钮
-        document.getElementById('getTablesBtn').addEventListener('click', () => {
+        // 刷新表按钮
+        document.getElementById('refreshTablesBtn').addEventListener('click', () => {
             this.getTablesList();
         });
+        
+        // 右侧面板折叠按钮
+        const collapseRightBtn = document.getElementById('collapseRightBtn');
+        if (collapseRightBtn) {
+            collapseRightBtn.addEventListener('click', () => {
+                this.toggleRightPanel();
+            });
+        }
 
         // 全选/取消全选按钮
         document.getElementById('selectAllBtn').addEventListener('click', () => {
@@ -78,11 +317,6 @@ class DatabaseDocGenerator {
             this.selectNewTablesOnly();
         });
 
-        // 表格折叠按钮
-        document.getElementById('toggleTablesBtn').addEventListener('click', () => {
-            this.toggleTablesCollapse();
-        });
-
         // 生成文档按钮
         document.getElementById('generateBtn').addEventListener('click', () => {
             this.generateDocs();
@@ -94,110 +328,245 @@ class DatabaseDocGenerator {
         });
 
         // 预览按钮
-        document.getElementById('previewBtn').addEventListener('click', () => {
-            this.previewDocument();
-        });
+        const previewBtn = document.getElementById('previewBtn');
+        if (previewBtn) {
+            previewBtn.addEventListener('click', () => {
+                this.previewDocument();
+            });
+        }
 
-        // 预览模态框中的下载按钮
-        document.getElementById('downloadFromPreviewBtn').addEventListener('click', () => {
-            this.downloadFile();
-        });
+        // 保存表说明和字段说明按钮
+        const saveTableDescBtn = document.getElementById('saveTableDescBtn');
+        if (saveTableDescBtn) {
+            saveTableDescBtn.addEventListener('click', () => {
+                this.saveTableDescription();
+            });
+        }
 
-        // 预览模态框中的全屏按钮
-        document.getElementById('fullscreenFromPreviewBtn').addEventListener('click', () => {
-            this.openFullscreenFromPreview();
-        });
+        // 生成所有字段说明按钮
+        const generateAllFieldsBtn = document.getElementById('generateAllFieldsBtn');
+        if (generateAllFieldsBtn) {
+            generateAllFieldsBtn.addEventListener('click', () => {
+                this.generateAllFieldsDescription();
+            });
+        }
 
-        // 数据库类型切换处理
-        document.getElementById('dbType').addEventListener('change', (e) => {
-            this.onDbTypeChange(e.target.value);
-        });
+        // 生成表说明按钮
+        const generateTableDescBtn = document.getElementById('generateTableDescBtn');
+        if (generateTableDescBtn) {
+            generateTableDescBtn.addEventListener('click', () => {
+                this.generateTableDescription();
+            });
+        }
 
-        // 连接历史相关事件
-        document.getElementById('connectionHistory').addEventListener('change', (e) => {
-            this.loadConnectionFromHistory(e.target.value);
-        });
+        // 下一处待补充
+        const nextMissingBtn = document.getElementById('nextMissingBtn');
+        if (nextMissingBtn) {
+            nextMissingBtn.addEventListener('click', () => {
+                this.gotoNextMissingInCurrentTable();
+            });
+        }
 
-        document.getElementById('deleteConnectionBtn').addEventListener('click', () => {
-            this.deleteSelectedConnection();
-        });
-
-        document.getElementById('clearFormBtn').addEventListener('click', () => {
-            this.clearConnectionForm();
-        });
-
-        // 保存配置
-        document.getElementById('dbConfigForm').addEventListener('change', () => {
-            this.saveConfig();
-        });
+        // 补齐缺失（仅缺失）
+        const generateMissingBtn = document.getElementById('generateMissingBtn');
+        if (generateMissingBtn) {
+            generateMissingBtn.addEventListener('click', () => {
+                this.generateMissingForCurrentTable();
+            });
+        }
 
         // 文档查看器相关事件
         this.initDocumentViewer();
-    }
+        
+        // 一键生成所有表描述按钮
+        const generateAllTablesBtn = document.getElementById('generateAllTablesBtn');
+        if (generateAllTablesBtn) {
+            generateAllTablesBtn.addEventListener('click', () => {
+                this.generateAllTablesDescription();
+            });
+        }
+        
+        // 切换连接按钮
+        document.getElementById('changeConnectionBtn').addEventListener('click', () => {
+            window.location.href = '/connections';
+        });
 
-    // 加载保存的配置
-    loadSavedConfig() {
-        const config = localStorage.getItem('dbConfig');
-        if (config) {
-            const parsedConfig = JSON.parse(config);
-            Object.keys(parsedConfig).forEach(key => {
-                const element = document.getElementById(key);
-                if (element) {
-                    element.value = parsedConfig[key];
-                }
+        // 侧边助手：保存当前表/跳转导出
+        const assistantSaveCurrentBtn = document.getElementById('assistantSaveCurrentBtn');
+        if (assistantSaveCurrentBtn) {
+            assistantSaveCurrentBtn.addEventListener('click', () => {
+                this.saveTableDescription();
+            });
+        }
+        const assistantGoExportBtn = document.getElementById('assistantGoExportBtn');
+        if (assistantGoExportBtn) {
+            assistantGoExportBtn.addEventListener('click', () => {
+                this.setMode('export');
+            });
+        }
+
+        // 标注工具栏
+        const annotateRefreshBtn = document.getElementById('annotateRefreshBtn');
+        if (annotateRefreshBtn) {
+            annotateRefreshBtn.addEventListener('click', () => {
+                this.renderAnnotateMissingList();
+            });
+        }
+        const annotateNextBtn = document.getElementById('annotateNextBtn');
+        if (annotateNextBtn) {
+            annotateNextBtn.addEventListener('click', () => {
+                this.gotoNextMissingTable();
+            });
+        }
+        const annotateGenerateSaveAllBtn = document.getElementById('annotateGenerateSaveAllBtn');
+        if (annotateGenerateSaveAllBtn) {
+            annotateGenerateSaveAllBtn.addEventListener('click', () => {
+                this.generateAndSaveAllMissing();
+            });
+        }
+
+        // 导出历史
+        const clearExportHistoryBtn = document.getElementById('clearExportHistoryBtn');
+        if (clearExportHistoryBtn) {
+            clearExportHistoryBtn.addEventListener('click', () => {
+                this.clearExportHistory();
+            });
+        }
+
+        // 导出完成态动作
+        const copyPathBtn = document.getElementById('copyPathBtn');
+        if (copyPathBtn) {
+            copyPathBtn.addEventListener('click', () => {
+                this.copyGeneratedFilePath();
+            });
+        }
+        const openFolderBtn = document.getElementById('openFolderBtn');
+        if (openFolderBtn) {
+            openFolderBtn.addEventListener('click', () => {
+                this.openGeneratedFileFolder();
+            });
+        }
+        const reopenExportBtn = document.getElementById('reopenExportBtn');
+        if (reopenExportBtn) {
+            reopenExportBtn.addEventListener('click', () => {
+                this.setMode('export');
+            });
+        }
+
+        // 右侧迷你操作条
+        const expandAssistantBtn = document.getElementById('expandAssistantBtn');
+        if (expandAssistantBtn) {
+            expandAssistantBtn.addEventListener('click', () => {
+                this.setRightPanelCollapsed(false);
+            });
+        }
+        const miniSaveBtn = document.getElementById('miniSaveBtn');
+        if (miniSaveBtn) {
+            miniSaveBtn.addEventListener('click', () => {
+                this.saveTableDescription();
+            });
+        }
+        const miniExportBtn = document.getElementById('miniExportBtn');
+        if (miniExportBtn) {
+            miniExportBtn.addEventListener('click', () => {
+                this.setMode('export');
             });
         }
     }
 
-    // 保存配置到本地存储
-    saveConfig() {
-        const config = {
-            dbType: document.getElementById('dbType').value,
-            host: document.getElementById('host').value,
-            port: document.getElementById('port').value,
-            user: document.getElementById('user').value,
-            password: document.getElementById('password').value,
-            database: document.getElementById('database').value
-        };
-        localStorage.setItem('dbConfig', JSON.stringify(config));
-    }
-
-    // 数据库类型切换处理
-    onDbTypeChange(dbType) {
-        const portInput = document.getElementById('port');
-        const currentPort = portInput.value;
-        
-        // 如果当前端口是默认端口，则自动切换
-        if (dbType === 'mysql' && (currentPort === '1433' || currentPort === '')) {
-            portInput.value = '3306';
-        } else if (dbType === 'sqlserver' && (currentPort === '3306' || currentPort === '')) {
-            portInput.value = '1433';
+    // 设置默认输出路径
+    async setDefaultOutputPath() {
+        try {
+            const response = await fetch('/api/default_path');
+            const result = await response.json();
+            if (result.success) {
+                this.outputPath = result.path;
+                document.getElementById('outputPath').value = result.path;
+            }
+        } catch (error) {
+            console.error('获取默认输出路径失败:', error);
+            // 使用浏览器默认下载路径
+            this.outputPath = '';
         }
-        
-        // 保存配置
-        this.saveConfig();
     }
 
-    // 获取数据库配置
-    getDbConfig() {
-        return {
-            db_type: document.getElementById('dbType').value,
-            host: document.getElementById('host').value,
-            user: document.getElementById('user').value,
-            password: document.getElementById('password').value,
-            port: document.getElementById('port').value,
-            database: document.getElementById('database').value
-        };
+    // 选择输出路径
+    async selectOutputPath() {
+        try {
+            const response = await fetch('/api/select_directory');
+            const result = await response.json();
+            if (result.success) {
+                this.outputPath = result.path;
+                document.getElementById('outputPath').value = result.path;
+                this.updateGenerateButton();
+            }
+        } catch (error) {
+            console.error('选择输出路径失败:', error);
+            this.showMessage('选择路径失败', 'danger');
+        }
     }
 
     // 显示加载状态
     showLoading() {
-        document.getElementById('loadingOverlay').style.display = 'flex';
+        // 创建全局加载覆盖层（如果不存在）
+        let loadingOverlay = document.getElementById('loadingOverlay');
+        if (!loadingOverlay) {
+            loadingOverlay = document.createElement('div');
+            loadingOverlay.id = 'loadingOverlay';
+            loadingOverlay.style.cssText = `
+                position: fixed;
+                top: 0;
+                left: 0;
+                width: 100%;
+                height: 100%;
+                background-color: rgba(255, 255, 255, 0.7);
+                display: flex;
+                justify-content: center;
+                align-items: center;
+                z-index: 9999;
+                font-size: 1.2rem;
+                color: #007bff;
+            `;
+            loadingOverlay.innerHTML = `
+                <div class="text-center">
+                    <div class="spinner-border" role="status">
+                        <span class="visually-hidden">Loading...</span>
+                    </div>
+                    <div class="mt-2">加载中...</div>
+                </div>
+            `;
+            document.body.appendChild(loadingOverlay);
+        }
+        loadingOverlay.style.display = 'flex';
     }
 
     // 隐藏加载状态
     hideLoading() {
-        document.getElementById('loadingOverlay').style.display = 'none';
+        const loadingOverlay = document.getElementById('loadingOverlay');
+        if (loadingOverlay) {
+            loadingOverlay.style.display = 'none';
+        }
+    }
+
+    // 为按钮添加加载状态
+    setButtonLoading(buttonId, isLoading, loadingText = '加载中...') {
+        const button = document.getElementById(buttonId);
+        if (button) {
+            if (isLoading) {
+                button.disabled = true;
+                button.innerHTML = `<span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span> ${loadingText}`;
+            } else {
+                button.disabled = false;
+                // 恢复按钮原始内容
+                if (buttonId === 'refreshTablesBtn') {
+                    button.innerHTML = '<i class="fas fa-sync-alt"></i> 刷新表';
+                } else if (buttonId === 'saveTableDescBtn') {
+                    button.innerHTML = '<i class="fas fa-save"></i> 保存';
+                } else if (buttonId === 'generateBtn') {
+                    button.innerHTML = '<i class="fas fa-file-alt"></i> 导出DB文档';
+                }
+            }
+        }
     }
 
     // 显示消息 - 使用Toast方式避免页面跳动
@@ -206,131 +575,65 @@ class DatabaseDocGenerator {
         showToast(message, type);
     }
 
-    // 测试数据库连接
-    async testConnection() {
-        console.log('testConnection called');
-        this.showLoading();
-        
-        try {
-            const config = this.getDbConfig();
-            const response = await fetch('/api/test_connection', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify(config)
-            });
-
-            const result = await response.json();
-            
-            if (result.success) {
-                console.log('Showing success message');
-                this.showMessage('数据库连接成功！', 'success');
-                // 连接成功后保存到历史记录
-                this.saveConnectionToHistory(config);
-                // 加载数据库列表供选择
-                await this.loadDatabasesList();
-            } else {
-                console.log('Showing error message');
-                this.showMessage(`连接失败: ${result.message}`, 'danger');
-            }
-        } catch (error) {
-            console.log('Showing catch error message');
-            this.showMessage(`连接错误: ${error.message}`, 'danger');
-        } finally {
-            this.hideLoading();
-        }
-    }
-
     // 获取表列表
-    async getTablesList() {
-        this.showLoading();
+    async getTablesList(options = {}) {
+        const { silent = false } = options || {};
+        this.setButtonLoading('refreshTablesBtn', true, '获取中...');
+        if (!silent) this.showMessage('正在获取表列表...', 'info');
         
         try {
-            const config = this.getDbConfig();
             const response = await fetch('/api/get_tables', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
                 },
-                body: JSON.stringify(config)
+                body: JSON.stringify(this.currentConnection)
             });
 
             const result = await response.json();
             
             if (result.success) {
                 this.displayTables(result.tables);
-                this.showMessage(`成功获取到 ${result.tables.length} 个表`, 'success');
+                if (!silent) this.showMessage(`成功获取到 ${result.tables.length} 个表`, 'success');
             } else {
-                this.showMessage(`获取表列表失败: ${result.message}`, 'danger');
+                if (!silent) this.showMessage(`获取表列表失败: ${result.message}`, 'danger');
             }
         } catch (error) {
-            this.showMessage(`获取表列表错误: ${error.message}`, 'danger');
+            if (!silent) this.showMessage(`获取表列表错误: ${error.message}`, 'danger');
         } finally {
-            this.hideLoading();
+            this.setButtonLoading('refreshTablesBtn', false);
         }
-    }
-    
-    // 加载数据库列表
-    async loadDatabasesList() {
-        try {
-            const config = this.getDbConfig();
-            const payload = {
-                db_type: config.db_type,
-                host: config.host,
-                user: config.user,
-                password: config.password,
-                port: config.port
-            };
-            const response = await fetch('/api/list_databases', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify(payload)
-            });
-            const result = await response.json();
-            if (result.success) {
-                const databases = Array.isArray(result.databases) ? result.databases : [];
-                this.renderDatabaseDatalist(databases);
-            } else {
-                this.showMessage(`加载数据库列表失败: ${result.message}`, 'warning');
-            }
-        } catch (error) {
-            this.showMessage(`加载数据库列表错误: ${error.message}`, 'danger');
-        }
-    }
-
-
-    // 渲染datalist建议
-    renderDatabaseDatalist(databases) {
-        const datalist = document.getElementById('databaseOptions');
-        if (!datalist) return;
-        datalist.innerHTML = '';
-        if (!Array.isArray(databases) || databases.length === 0) {
-            return;
-        }
-        databases.forEach(name => {
-            const opt = document.createElement('option');
-            opt.value = name;
-            datalist.appendChild(opt);
-        });
     }
 
     // 显示表列表
     displayTables(tables) {
         const container = document.getElementById('tablesContainer');
         container.innerHTML = '';
+        this.tablesTotal = Array.isArray(tables) ? tables.length : 0;
+        this.missingDescTables.clear();
+        this.allTableNames = [];
+        this.tableMissingMap.clear();
 
         tables.forEach(tableData => {
             // 处理表数据：如果是数组/元组，取第一个元素作为表名
             let tableName, tableType, tableComment;
+            let missingTableComment = false;
+            let missingColumnsCount = 0;
+            let missingTotal = 0;
             
             if (Array.isArray(tableData)) {
                 // 数组格式：[table_name, table_type, table_comment]
                 tableName = tableData[0];
                 tableType = tableData[1] || '';
                 tableComment = tableData[2] || '';
+            } else if (typeof tableData === 'object' && tableData !== null) {
+                // 新格式（Phase2）：{ table_name, table_type, table_comment, missing_* }
+                tableName = tableData.table_name || tableData.name || tableData.tableName;
+                tableType = tableData.table_type || tableData.type || '';
+                tableComment = tableData.table_comment || tableData.comment || '';
+                missingTableComment = !!tableData.missing_table_comment;
+                missingColumnsCount = Number(tableData.missing_columns_count || 0);
+                missingTotal = Number(tableData.missing_total || 0);
             } else if (typeof tableData === 'string') {
                 // 字符串格式：直接是表名
                 tableName = tableData;
@@ -343,46 +646,86 @@ class DatabaseDocGenerator {
                 tableComment = '';
             }
 
-            const checkboxDiv = document.createElement('div');
-            checkboxDiv.className = 'col-md-4 col-sm-6 mb-2';
-            
-            // 构建显示标签，包含表名和类型信息
-            let displayLabel = tableName;
-            if (tableType && tableType !== 'BASE TABLE') {
-                displayLabel += ` (${tableType})`;
+            if (!tableName) return;
+            this.allTableNames.push(tableName);
+
+            const safeTableName = this.escapeHtml(tableName);
+            const safeTableType = this.escapeHtml(tableType);
+            const checkboxId = `table_${this.makeSafeId(tableName)}`;
+
+            const listItem = document.createElement('div');
+            listItem.className = 'list-group-item list-group-item-action';
+            listItem.dataset.tableName = tableName;
+            // 标记“待补充”（Phase2：来自后端聚合统计；旧格式则默认为未知=0）
+            const isMissing = (missingTotal > 0) || missingTableComment || (missingColumnsCount > 0);
+            listItem.dataset.missingDesc = isMissing ? '1' : '0';
+
+            this.tableMissingMap.set(tableName, {
+                missing_total: missingTotal,
+                missing_table_comment: missingTableComment,
+                missing_columns_count: missingColumnsCount,
+            });
+
+            if (isMissing) {
+                this.missingDescTables.add(tableName);
+                listItem.classList.add('table-missing-desc');
             }
-            
-            checkboxDiv.innerHTML = `
-                <div class="table-checkbox-item" title="${tableComment || tableName}">
-                    <div class="form-check">
-                        <input class="form-check-input" type="checkbox" value="${tableName}" id="table_${tableName}">
-                        <label class="form-check-label" for="table_${tableName}">
-                            ${displayLabel}
-                        </label>
+
+            listItem.innerHTML = `
+                <div class="d-flex align-items-start gap-2">
+                    <input class="form-check-input mt-1" type="checkbox" value="${safeTableName}" id="${checkboxId}">
+                    <div class="flex-grow-1">
+                        <div class="d-flex justify-content-between align-items-start gap-2">
+                            <button type="button" class="btn btn-link p-0 table-open-btn" data-table-name="${safeTableName}" title="查看表结构">
+                                <strong class="table-name">${safeTableName}</strong>
+                                ${tableType && tableType !== 'BASE TABLE' ? `<small class="text-muted ms-1">(${safeTableType})</small>` : ''}
+                            </button>
+                            <span class="table-flags ms-2"></span>
+                        </div>
+                        ${tableComment ? `<div class="small text-muted mt-1 text-truncate">${this.escapeHtml(tableComment)}</div>` : ''}
                     </div>
                 </div>
             `;
-            container.appendChild(checkboxDiv);
+            container.appendChild(listItem);
+
+            // 渲染“待补充”标识（来自后端聚合统计）
+            const flags = listItem.querySelector('.table-flags');
+            if (flags) {
+                flags.innerHTML = isMissing ? '<span class="badge bg-danger">待补充</span>' : '';
+            }
 
             // 添加点击事件
-            const checkbox = checkboxDiv.querySelector('input[type="checkbox"]');
-            const item = checkboxDiv.querySelector('.table-checkbox-item');
+            const checkbox = listItem.querySelector('input[type="checkbox"]');
+            const openBtn = listItem.querySelector('.table-open-btn');
             
+            // 复选框变化事件
             checkbox.addEventListener('change', () => {
                 if (checkbox.checked) {
                     this.selectedTables.add(tableName);
-                    item.classList.add('selected');
+                    listItem.classList.add('selected');
                 } else {
                     this.selectedTables.delete(tableName);
-                    item.classList.remove('selected');
+                    listItem.classList.remove('selected');
                 }
                 this.updateGenerateButton();
+                this.updateTablesStats();
+                this.updateExportSummary();
                 
                 // 如果是增量更新模式，更新新表格信息
                 if (this.incrementalMode && this.existingTables.length > 0) {
                     this.updateNewTablesInfo();
                 }
             });
+
+            // 查看表详情（避免label点击导致“查看 + 勾选”冲突）
+            if (openBtn) {
+                openBtn.addEventListener('click', (e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    this.setActiveTable(tableName);
+                    this.showTableDetail(tableName);
+                });
+            }
         });
 
         // 显示表选择区域
@@ -392,13 +735,623 @@ class DatabaseDocGenerator {
         // 显示数据库功能介绍区域
         document.getElementById('dbDescriptionSection').style.display = 'block';
         document.getElementById('dbDescriptionSection').classList.add('fade-in');
-        
-        // 显示文件保存设置区域
-        document.getElementById('outputSection').style.display = 'block';
-        document.getElementById('outputSection').classList.add('fade-in');
+        // 导出设置：仅在导出模式显示
+        const outputSection = document.getElementById('outputSection');
+        if (outputSection) {
+            outputSection.style.display = this.currentMode === 'export' ? 'block' : 'none';
+            outputSection.classList.toggle('fade-in', this.currentMode === 'export');
+        }
         
         // 生成默认文件名
         this.generateFileName();
+
+        // 添加表搜索/筛选功能
+        this.initTableSearch();
+        this.initTableFilters();
+        this.updateTablesStats();
+        this.renderAnnotateMissingList();
+        this.applyTableFilters();
+        this.updateGenerateButton();
+    }
+
+    // 初始化表搜索功能
+    initTableSearch() {
+        const searchInput = document.getElementById('tableSearch');
+        if (!searchInput) return;
+
+        if (this.tableSearchBound) return;
+        this.tableSearchBound = true;
+
+        searchInput.addEventListener('input', (e) => {
+            this.tableSearchTerm = (e.target.value || '').toLowerCase();
+            this.applyTableFilters();
+        });
+    }
+
+    initTableFilters() {
+        const filterMissingOnly = document.getElementById('filterMissingOnly');
+        if (!filterMissingOnly) return;
+        if (this.tableFiltersBound) return;
+        this.tableFiltersBound = true;
+
+        filterMissingOnly.addEventListener('change', () => {
+            this.applyTableFilters();
+        });
+    }
+
+    applyTableFilters() {
+        const filterMissingOnly = document.getElementById('filterMissingOnly');
+        const missingOnly = !!(filterMissingOnly && filterMissingOnly.checked);
+        const searchTerm = (this.tableSearchTerm || '').trim();
+
+        const tableItems = document.querySelectorAll('#tablesContainer .list-group-item');
+        tableItems.forEach(item => {
+            const tableName = (item.dataset.tableName || '').toLowerCase();
+            const isMissing = item.dataset.missingDesc === '1';
+
+            const matchSearch = !searchTerm || tableName.includes(searchTerm);
+            const matchMissing = !missingOnly || isMissing;
+
+            item.style.display = (matchSearch && matchMissing) ? 'block' : 'none';
+        });
+    }
+
+    updateTablesStats() {
+        const totalBadge = document.getElementById('tablesTotalBadge');
+        const selectedBadge = document.getElementById('tablesSelectedBadge');
+        const missingBadge = document.getElementById('tablesMissingBadge');
+
+        if (totalBadge) totalBadge.textContent = `总表 ${this.tablesTotal}`;
+        if (selectedBadge) selectedBadge.textContent = `已选 ${this.selectedTables.size}`;
+        if (missingBadge) missingBadge.textContent = `待补充 ${this.missingDescTables.size}`;
+
+        // 同步导出摘要（若存在）
+        this.updateExportSummary();
+    }
+
+    // 设置左侧表列表的“当前查看表”（与批量勾选区分）
+    setActiveTable(tableName) {
+        this.activeTableName = tableName || '';
+        const items = document.querySelectorAll('#tablesContainer .list-group-item');
+        items.forEach(item => {
+            item.classList.toggle('table-active', (item.dataset.tableName === this.activeTableName));
+        });
+    }
+
+    // 导出模式摘要
+    updateExportSummary() {
+        const exportSelectedBadge = document.getElementById('exportSelectedBadge');
+        const exportMissingBadge = document.getElementById('exportMissingBadge');
+
+        if (exportSelectedBadge) exportSelectedBadge.textContent = `已选 ${this.selectedTables.size}`;
+
+        // 统计“已选表”里有多少是待补充（更贴合导出前校验）
+        let missingSelected = 0;
+        this.selectedTables.forEach(t => {
+            const meta = this.tableMissingMap.get(t);
+            if (meta && (Number(meta.missing_total) > 0 || meta.missing_table_comment || Number(meta.missing_columns_count) > 0)) {
+                missingSelected += 1;
+            }
+        });
+        if (exportMissingBadge) exportMissingBadge.textContent = `待补充 ${missingSelected}`;
+    }
+
+    // 标注模式：渲染“待补充”表清单
+    renderAnnotateMissingList() {
+        const container = document.getElementById('annotateMissingList');
+        if (!container) return;
+
+        const missingTables = Array.from(this.missingDescTables);
+        if (missingTables.length === 0) {
+            container.innerHTML = `
+                <div class="text-center text-muted p-4">
+                    <i class="fas fa-check-circle fa-2x mb-2 opacity-50"></i>
+                    <div class="fw-semibold">暂无待补充项</div>
+                    <div class="small">当前库的表与字段注释看起来都已完善</div>
+                </div>
+            `;
+            return;
+        }
+
+        container.innerHTML = missingTables.map(name => {
+            const meta = this.tableMissingMap.get(name) || {};
+            const missingCols = Number(meta.missing_columns_count || 0);
+            const missingTbl = meta.missing_table_comment ? 1 : 0;
+            const detail = [
+                missingTbl ? '缺表说明' : null,
+                missingCols ? `缺字段说明 ${missingCols}` : null,
+            ].filter(Boolean).join(' / ');
+            return `
+                <div class="list-group-item d-flex justify-content-between align-items-center gap-2">
+                    <div class="text-truncate">
+                        <div class="d-flex align-items-center gap-2">
+                            <i class="fas fa-table text-primary"></i>
+                            <strong class="text-truncate">${this.escapeHtml(name)}</strong>
+                            <span class="badge bg-danger">待补充</span>
+                        </div>
+                        <div class="small text-muted mt-1">${detail}</div>
+                    </div>
+                    <div class="btn-group btn-group-sm flex-shrink-0">
+                        <button type="button" class="btn btn-outline-secondary annotate-open-table" data-table-name="${this.escapeHtml(name)}">
+                            <i class="fas fa-eye"></i> 打开
+                        </button>
+                        <button type="button" class="btn btn-outline-info annotate-generate-missing" data-table-name="${this.escapeHtml(name)}" title="仅生成缺失说明（不保存）">
+                            <i class="fas fa-wand-magic-sparkles"></i> 生成缺失
+                        </button>
+                        <button type="button" class="btn btn-outline-success annotate-generate-save" data-table-name="${this.escapeHtml(name)}" title="生成缺失并保存到数据库">
+                            <i class="fas fa-save"></i> 生成并保存
+                        </button>
+                    </div>
+                </div>
+            `;
+        }).join('');
+
+        // 打开该表
+        container.querySelectorAll('.annotate-open-table').forEach(btn => {
+            btn.addEventListener('click', () => {
+                const target = btn.getAttribute('data-table-name');
+                this.setMode('browse');
+                this.setActiveTable(target);
+                this.showTableDetail(target);
+            });
+        });
+        // 仅生成缺失（不保存）
+        container.querySelectorAll('.annotate-generate-missing').forEach(btn => {
+            btn.addEventListener('click', async () => {
+                const target = btn.getAttribute('data-table-name');
+                await this.generateMissingForTable(target, false);
+            });
+        });
+        // 生成并保存
+        container.querySelectorAll('.annotate-generate-save').forEach(btn => {
+            btn.addEventListener('click', async () => {
+                const target = btn.getAttribute('data-table-name');
+                await this.generateMissingForTable(target, true);
+            });
+        });
+    }
+
+    // 显示表详情
+    async showTableDetail(tableName) {
+        this.showLoading();
+        
+        try {
+            const config = {...this.currentConnection};
+            config.table_name = tableName;
+            
+            const response = await fetch('/api/get_table_detail', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify(config)
+            });
+
+            const result = await response.json();
+            
+            if (result.success) {
+                this.displayTableDetail(tableName, result.table_info, result.fields);
+            } else {
+                this.showMessage(`获取表详情失败: ${result.message}`, 'danger');
+            }
+        } catch (error) {
+            this.showMessage(`获取表详情错误: ${error.message}`, 'danger');
+        } finally {
+            this.hideLoading();
+        }
+    }
+
+    // 显示表详情
+    displayTableDetail(tableName, tableInfo, fields) {
+        // 更新当前表名
+        document.getElementById('currentTableName').textContent = tableName;
+        this.setActiveTable(tableName);
+        this.updateDirtyIndicator(tableName);
+        
+        // 尝试从本地存储加载保存的数据
+        const savedTableData = this.loadTableDataFromLocalStorage(tableName);
+        
+        // 更新表说明
+        const tableDescription = savedTableData ? savedTableData.tableDescription : (tableInfo.comment || '');
+        document.getElementById('tableDescription').value = tableDescription;
+        
+        // 生成字段表格
+        const fieldsTableBody = document.getElementById('fieldsTableBody');
+        fieldsTableBody.innerHTML = '';
+        
+        fields.forEach(field => {
+            // 使用保存的字段说明或默认值
+            const fieldDescription = savedTableData && savedTableData.fieldDescriptions && savedTableData.fieldDescriptions[field.name] 
+                ? savedTableData.fieldDescriptions[field.name] 
+                : (field.comment || '');
+                
+            const row = document.createElement('tr');
+            row.innerHTML = `
+                <td>${field.name}</td>
+                <td>${field.type}</td>
+                <td>${field.nullable ? '是' : '否'}</td>
+                <td>${field.default ? field.default : '-'}</td>
+                <td>
+                    <textarea class="form-control form-control-sm field-description" rows="1" placeholder="请输入字段说明...">${fieldDescription}</textarea>
+                </td>
+                <td>
+                    <button type="button" class="btn btn-sm btn-outline-info generate-field-desc" data-field-name="${field.name}" title="生成字段说明">
+                        <i class="fas fa-brain"></i>
+                    </button>
+                </td>
+            `;
+            fieldsTableBody.appendChild(row);
+        });
+        
+        // 绑定字段说明生成按钮事件
+        this.bindFieldDescGenerateEvents();
+        
+        // 为字段说明textarea添加自动调整高度功能
+        this.initAutoResizeTextarea();
+
+        // 标记脏状态（用户编辑即视为未保存）
+        this.bindDirtyTracking(tableName);
+        
+        // 显示表详情区域
+        document.getElementById('tableDetailSection').style.display = 'block';
+        document.getElementById('noTableSelected').style.display = 'none';
+    }
+
+    bindDirtyTracking(tableName) {
+        const tableDesc = document.getElementById('tableDescription');
+        if (tableDesc && !tableDesc.dataset.dirtyBound) {
+            tableDesc.dataset.dirtyBound = '1';
+            tableDesc.addEventListener('input', () => this.markDirty(tableName));
+        }
+        const textareas = document.querySelectorAll('#fieldsTableBody .field-description');
+        textareas.forEach(t => {
+            if (t.dataset.dirtyBound) return;
+            t.dataset.dirtyBound = '1';
+            t.addEventListener('input', () => this.markDirty(tableName));
+        });
+    }
+
+    markDirty(tableName) {
+        if (!tableName) return;
+        this.dirtyTables.add(tableName);
+        this.updateDirtyIndicator(tableName);
+    }
+
+    clearDirty(tableName) {
+        if (!tableName) return;
+        this.dirtyTables.delete(tableName);
+        this.updateDirtyIndicator(tableName);
+    }
+
+    updateDirtyIndicator(tableName) {
+        const indicator = document.getElementById('dirtyIndicator');
+        if (!indicator) return;
+        const isDirty = this.dirtyTables.has(tableName);
+        indicator.style.display = isDirty ? 'inline-block' : 'none';
+    }
+
+    // 初始化自动调整高度的textarea
+    initAutoResizeTextarea() {
+        const textareas = document.querySelectorAll('.field-description');
+        textareas.forEach(textarea => {
+            // 自动调整高度
+            const autoResize = () => {
+                textarea.style.height = 'auto';
+                textarea.style.height = `${textarea.scrollHeight}px`;
+            };
+            
+            // 初始调整
+            autoResize();
+            
+            // 绑定事件
+            textarea.addEventListener('input', autoResize);
+            textarea.addEventListener('change', autoResize);
+            textarea.addEventListener('focus', autoResize);
+            
+            // 为textarea添加点击事件，方便编辑
+            textarea.addEventListener('click', () => {
+                textarea.select();
+            });
+        });
+    }
+
+    // 绑定字段说明生成按钮事件
+    bindFieldDescGenerateEvents() {
+        const generateButtons = document.querySelectorAll('.generate-field-desc');
+        generateButtons.forEach(button => {
+            button.addEventListener('click', (e) => {
+                const fieldName = e.target.closest('button').dataset.fieldName;
+                this.generateFieldDescription(fieldName);
+            });
+        });
+    }
+
+    // 生成字段说明
+    async generateFieldDescription(fieldName) {
+        this.showLoading();
+        try {
+            const dbDescription = document.getElementById('dbDescription').value.trim();
+            const currentTableName = document.getElementById('currentTableName').textContent;
+            
+            const response = await fetch('/api/generate_field_description', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    ...this.currentConnection,
+                    table_name: currentTableName,
+                    field_name: fieldName,
+                    db_description: dbDescription
+                })
+            });
+
+            const result = await response.json();
+            if (result.success) {
+                // 更新字段说明
+                const fieldRows = document.querySelectorAll('#fieldsTableBody tr');
+                fieldRows.forEach(row => {
+                    const fieldNameCell = row.querySelector('td:nth-child(1)');
+                    if (fieldNameCell && fieldNameCell.textContent === fieldName) {
+                        const descTextarea = row.querySelector('.field-description');
+                        if (descTextarea) {
+                            descTextarea.value = result.field_description;
+                        }
+                    }
+                });
+                this.showMessage('字段说明生成成功！', 'success');
+            } else {
+                this.showMessage(`生成失败: ${result.message}`, 'danger');
+            }
+        } catch (error) {
+            this.showMessage(`生成错误: ${error.message}`, 'danger');
+        } finally {
+            this.hideLoading();
+        }
+    }
+
+    // 生成所有字段说明
+    async generateAllFieldsDescription() {
+        this.showLoading();
+        try {
+            const dbDescription = document.getElementById('dbDescription').value.trim();
+            const currentTableName = document.getElementById('currentTableName').textContent;
+            
+            const response = await fetch('/api/generate_all_fields_description', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    ...this.currentConnection,
+                    table_name: currentTableName,
+                    db_description: dbDescription
+                })
+            });
+
+            const result = await response.json();
+            if (result.success) {
+                // 更新所有字段说明
+                const fieldRows = document.querySelectorAll('#fieldsTableBody tr');
+                fieldRows.forEach(row => {
+                    const fieldNameCell = row.querySelector('td:nth-child(1)');
+                    if (fieldNameCell) {
+                        const fieldName = fieldNameCell.textContent;
+                        const descTextarea = row.querySelector('.field-description');
+                        if (descTextarea && result.field_meanings[fieldName]) {
+                            descTextarea.value = result.field_meanings[fieldName];
+                        }
+                    }
+                });
+                this.showMessage('所有字段说明生成成功！', 'success');
+            } else {
+                this.showMessage(`生成失败: ${result.message}`, 'danger');
+            }
+        } catch (error) {
+            this.showMessage(`生成错误: ${error.message}`, 'danger');
+        } finally {
+            this.hideLoading();
+        }
+    }
+
+    // 生成表说明
+    async generateTableDescription() {
+        this.showLoading();
+        try {
+            const dbDescription = document.getElementById('dbDescription').value.trim();
+            const currentTableName = document.getElementById('currentTableName').textContent;
+            
+            const response = await fetch('/api/generate_table_description', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    ...this.currentConnection,
+                    table_name: currentTableName,
+                    db_description: dbDescription
+                })
+            });
+
+            const result = await response.json();
+            if (result.success) {
+                // 更新表说明
+                const tableDescTextarea = document.getElementById('tableDescription');
+                if (tableDescTextarea) {
+                    tableDescTextarea.value = result.table_description;
+                }
+                this.showMessage('表说明生成成功！', 'success');
+            } else {
+                this.showMessage(`生成失败: ${result.message}`, 'danger');
+            }
+        } catch (error) {
+            this.showMessage(`生成错误: ${error.message}`, 'danger');
+        } finally {
+            this.hideLoading();
+        }
+    }
+
+    // 一键生成所有表和字段描述
+    async generateAllTablesDescription() {
+        try {
+            const dbDescription = document.getElementById('dbDescription').value.trim();
+            
+            // 显示确认对话框
+            const confirmResult = confirm('确定要一键生成所有表和字段的描述并更新到数据库吗？\n此操作可能需要较长时间，请耐心等待。');
+            if (!confirmResult) {
+                return;
+            }
+            
+            // 显示进度条
+            this.showProgressSection();
+            
+            // 初始化进度
+            this.totalTables = 0;
+            this.completedTables = 0;
+            
+            // 启动日志流，接收实时进度
+            this.startLogStreaming();
+            
+            const response = await fetch('/api/generate_all_tables_description', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    ...this.currentConnection,
+                    db_description: dbDescription
+                })
+            });
+
+            const result = await response.json();
+            if (result.success) {
+                this.showMessage(`一键生成完成！共处理 ${result.total_tables} 个表，成功 ${result.success_tables} 个，失败 ${result.failed_tables} 个。`, 'success');
+                // 刷新表列表，显示新的表注释
+                this.getTablesList();
+            } else {
+                this.showMessage(`生成失败: ${result.message}`, 'danger');
+            }
+            
+            // 关闭日志流
+            if (this.eventSource) {
+                this.eventSource.close();
+                this.eventSource = null;
+            }
+            
+            // 隐藏进度条
+            setTimeout(() => {
+                this.hideProgressSection();
+            }, 1000);
+        } catch (error) {
+            this.showMessage(`生成错误: ${error.message}`, 'danger');
+            // 关闭日志流
+            if (this.eventSource) {
+                this.eventSource.close();
+                this.eventSource = null;
+            }
+            this.hideProgressSection();
+        }
+    }
+
+    // 保存表说明和字段说明到数据库
+    saveTableDescription() {
+        const currentTableName = document.getElementById('currentTableName').textContent;
+        if (!currentTableName) {
+            this.showMessage('请先选择一个表！', 'warning');
+            return;
+        }
+
+        // 获取表说明
+        const tableDescription = document.getElementById('tableDescription').value.trim();
+
+        // 获取字段说明
+        const fieldDescriptions = {};
+        const fieldRows = document.querySelectorAll('#fieldsTableBody tr');
+        fieldRows.forEach(row => {
+            const fieldName = row.querySelector('td:nth-child(1)').textContent;
+            const fieldDesc = row.querySelector('.field-description').value.trim();
+            fieldDescriptions[fieldName] = fieldDesc;
+        });
+
+        // 构建保存数据
+        const saveData = {
+            ...this.currentConnection,
+            table_name: currentTableName,
+            table_description: tableDescription,
+            field_descriptions: fieldDescriptions
+        };
+
+        // 发送请求到后端保存到数据库
+        this.setButtonLoading('saveTableDescBtn', true, '保存中...');
+        fetch('/api/save_table_comment', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(saveData)
+        })
+        .then(response => response.json())
+        .then(result => {
+            if (result.success) {
+                this.showMessage('表说明和字段说明已保存到数据库！', 'success');
+                // 刷新表详情，确保显示最新的注释
+                this.showTableDetail(currentTableName);
+                // 清除未保存标记
+                this.clearDirty(currentTableName);
+                // 刷新左侧表列表状态（Phase2：一次性拉取缺失统计）
+                this.getTablesList();
+            } else {
+                this.showMessage(`保存失败: ${result.message}`, 'danger');
+            }
+        })
+        .catch(error => {
+            this.showMessage(`保存失败: ${error.message}`, 'danger');
+        })
+        .finally(() => {
+            this.setButtonLoading('saveTableDescBtn', false);
+        });
+    }
+
+    // 从本地存储加载表数据 - 兼容旧版本，保留此方法
+    loadTableDataFromLocalStorage(tableName) {
+        const savedTables = JSON.parse(localStorage.getItem('savedTableData') || '{}');
+        const connectionKey = `${this.currentConnection.db_type}_${this.currentConnection.host}_${this.currentConnection.port}_${this.currentConnection.database}`;
+        
+        if (savedTables[connectionKey] && savedTables[connectionKey][tableName]) {
+            return savedTables[connectionKey][tableName];
+        }
+        return null;
+    }
+
+    // 获取所有保存的表数据，用于生成文档时传递给后端 - 兼容旧版本，保留此方法
+    getAllSavedTableData() {
+        const savedTables = JSON.parse(localStorage.getItem('savedTableData') || '{}');
+        const connectionKey = `${this.currentConnection.db_type}_${this.currentConnection.host}_${this.currentConnection.port}_${this.currentConnection.database}`;
+        
+        return savedTables[connectionKey] || {};
+    }
+
+    // 更新左侧列表中表的描述状态
+    updateTableDescriptionStatus(tableName) {
+        // 找到对应的列表项
+        const listItems = document.querySelectorAll('#tablesContainer .list-group-item');
+        listItems.forEach(item => {
+            const checkbox = item.querySelector('input[type="checkbox"]');
+            if (checkbox && checkbox.value === tableName) {
+                // 重新检查描述状态
+                this.checkTableDescriptionStatus(tableName, item);
+            }
+        });
+    }
+
+    // 生成文件名
+    generateFileName() {
+        if (this.currentConnection && this.currentConnection.database) {
+            const databaseName = this.currentConnection.database;
+            const timestamp = new Date().toISOString().replace(/[:.]/g, '-').substring(0, 19);
+            this.fileName = `${databaseName}_文档_${timestamp}.md`;
+            document.getElementById('fileName').value = this.fileName;
+        }
     }
 
     // 全选表
@@ -406,10 +1359,13 @@ class DatabaseDocGenerator {
         const checkboxes = document.querySelectorAll('#tablesContainer input[type="checkbox"]');
         checkboxes.forEach(checkbox => {
             checkbox.checked = true;
-            this.selectedTables.add(checkbox.value);
-            checkbox.closest('.table-checkbox-item').classList.add('selected');
+            const item = checkbox.closest('.list-group-item');
+            const name = item?.dataset?.tableName || checkbox.value;
+            this.selectedTables.add(name);
+            item && item.classList.add('selected');
         });
         this.updateGenerateButton();
+        this.updateTablesStats();
     }
 
     // 取消全选
@@ -417,16 +1373,383 @@ class DatabaseDocGenerator {
         const checkboxes = document.querySelectorAll('#tablesContainer input[type="checkbox"]');
         checkboxes.forEach(checkbox => {
             checkbox.checked = false;
-            this.selectedTables.delete(checkbox.value);
-            checkbox.closest('.table-checkbox-item').classList.remove('selected');
+            const item = checkbox.closest('.list-group-item');
+            const name = item?.dataset?.tableName || checkbox.value;
+            this.selectedTables.delete(name);
+            item && item.classList.remove('selected');
         });
         this.updateGenerateButton();
+        this.updateTablesStats();
     }
 
     // 更新生成按钮状态
     updateGenerateButton() {
         const generateBtn = document.getElementById('generateBtn');
-        generateBtn.disabled = this.selectedTables.size === 0 || !this.outputPath;
+        const hint = document.getElementById('generateHint');
+
+        let reason = '';
+        if (this.selectedTables.size === 0) {
+            reason = '请选择要导出的表';
+        } else if (!this.outputPath) {
+            reason = '请选择文档保存路径';
+        } else if (this.incrementalMode && this.existingTables.length > 0) {
+            const hasNewTable = Array.from(this.selectedTables).some(t => !this.existingTables.includes(t));
+            if (!hasNewTable) {
+                reason = '增量更新：请至少选择一张“新表”（文档中不存在的表）';
+            }
+        }
+
+        const disabled = !!reason;
+        if (generateBtn) {
+            generateBtn.disabled = disabled;
+            generateBtn.title = disabled ? reason : '';
+        }
+        if (hint) {
+            hint.textContent = disabled ? reason : '已就绪：点击开始生成';
+        }
+    }
+
+    // =============== Phase1/2：增量更新（补齐缺失实现，避免点击报错） ===============
+    toggleIncrementalMode(enabled) {
+        this.incrementalMode = !!enabled;
+        const section = document.getElementById('existingDocSection');
+        if (section) section.style.display = this.incrementalMode ? 'block' : 'none';
+
+        // 关闭增量时清空状态
+        if (!this.incrementalMode) {
+            this.existingDocPath = '';
+            this.existingDocContent = '';
+            this.existingTables = [];
+            this.newTables = [];
+            const pathInput = document.getElementById('existingDocPath');
+            if (pathInput) pathInput.value = '';
+            const info = document.getElementById('existingTablesInfo');
+            if (info) info.style.display = 'none';
+            const selectNewOnlyBtn = document.getElementById('selectNewOnlyBtn');
+            if (selectNewOnlyBtn) selectNewOnlyBtn.style.display = 'none';
+        }
+
+        this.updateGenerateButton();
+    }
+
+    async selectExistingDoc() {
+        try {
+            // 使用后端 Tk 文件选择（桌面应用体验）
+            const pickResp = await fetch('/api/select_markdown_file');
+            const pickResult = await pickResp.json();
+            if (!pickResult.success) {
+                this.showMessage(pickResult.message || '未选择文档', 'warning');
+                return;
+            }
+
+            this.existingDocPath = pickResult.path;
+            const pathInput = document.getElementById('existingDocPath');
+            if (pathInput) pathInput.value = pickResult.path;
+
+            // 读取文档内容
+            const parseResp = await fetch('/api/parse_doc', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ doc_path: pickResult.path })
+            });
+            const parseResult = await parseResp.json();
+            if (!parseResult.success) {
+                this.showMessage(parseResult.message || '解析文档失败', 'danger');
+                return;
+            }
+
+            this.existingDocContent = parseResult.content || '';
+            this.existingTables = this.parseExistingTablesFromMarkdown(this.existingDocContent);
+            this.updateNewTablesInfo();
+
+            this.showMessage('已选择现有文档，增量更新将仅生成新表内容', 'success');
+            this.updateGenerateButton();
+        } catch (error) {
+            this.showMessage(`选择文档失败: ${error.message}`, 'danger');
+        }
+    }
+
+    parseExistingTablesFromMarkdown(content) {
+        if (!content) return [];
+        const tables = new Set();
+        const lines = String(content).split('\n');
+
+        // 兼容本项目生成格式：表: table_name - comment / 表: table_name
+        const re1 = /^表[:：]\s*([^\s-]+)\s*(?:-|$)/;
+        // 兼容标题格式：## 表: xxx / ## xxx
+        const re2 = /^##\s*表[:：]\s*(.+)\s*$/;
+        const re3 = /^##\s+(.+)\s*$/;
+
+        for (const raw of lines) {
+            const line = raw.trim();
+            if (!line) continue;
+            let m = line.match(re1);
+            if (m && m[1]) {
+                tables.add(m[1].trim());
+                continue;
+            }
+            m = line.match(re2);
+            if (m && m[1]) {
+                tables.add(m[1].trim());
+                continue;
+            }
+            // 谨慎：re3 可能误判普通二级标题，这里不默认加入，避免污染 existingTables
+        }
+        return Array.from(tables);
+    }
+
+    updateNewTablesInfo() {
+        // 根据当前库表列表与 existingTables 做 diff
+        const all = Array.isArray(this.allTableNames) ? this.allTableNames : [];
+        const existing = new Set(this.existingTables || []);
+        this.newTables = all.filter(t => !existing.has(t));
+
+        const existingInfo = document.getElementById('existingTablesInfo');
+        const existingCount = document.getElementById('existingTablesCount');
+        const newCount = document.getElementById('newTablesCount');
+        if (existingCount) existingCount.textContent = String((this.existingTables || []).length);
+        if (newCount) newCount.textContent = String((this.newTables || []).length);
+        if (existingInfo) existingInfo.style.display = 'block';
+
+        const selectNewOnlyBtn = document.getElementById('selectNewOnlyBtn');
+        if (selectNewOnlyBtn) selectNewOnlyBtn.style.display = 'inline-block';
+    }
+
+    selectNewTablesOnly() {
+        if (!this.incrementalMode) return;
+        if (!Array.isArray(this.newTables) || this.newTables.length === 0) {
+            this.showMessage('没有检测到“新表”（文档中不存在的表）', 'warning');
+            return;
+        }
+
+        // 先清空，再勾选新表
+        this.deselectAllTables();
+        const newSet = new Set(this.newTables);
+        const checkboxes = document.querySelectorAll('#tablesContainer input[type="checkbox"]');
+        checkboxes.forEach(checkbox => {
+            const name = checkbox.value;
+            if (newSet.has(name)) {
+                checkbox.checked = true;
+                this.selectedTables.add(name);
+                checkbox.closest('.list-group-item')?.classList.add('selected');
+            }
+        });
+
+        this.updateTablesStats();
+        this.updateGenerateButton();
+        this.showMessage(`已勾选 ${this.newTables.length} 张新表`, 'success');
+    }
+
+    // =============== Phase3：标注工作流（下一处 / 仅补齐缺失 / 一键生成并保存） ===============
+    gotoNextMissingTable() {
+        const list = Array.from(this.missingDescTables);
+        if (list.length === 0) {
+            this.showMessage('暂无待补充项', 'info');
+            return;
+        }
+        const target = list[0];
+        this.setMode('browse');
+        this.setActiveTable(target);
+        this.showTableDetail(target);
+        // 进入后直接定位下一处
+        setTimeout(() => this.gotoNextMissingInCurrentTable(), 300);
+    }
+
+    gotoNextMissingInCurrentTable() {
+        const tableName = document.getElementById('currentTableName')?.textContent || '';
+        if (!tableName) {
+            this.showMessage('请先打开一张表', 'warning');
+            return;
+        }
+
+        // 1) 表说明为空
+        const tableDesc = document.getElementById('tableDescription');
+        if (tableDesc && !String(tableDesc.value || '').trim()) {
+            tableDesc.focus();
+            tableDesc.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            this.showMessage('定位到：表说明（待补充）', 'info');
+            return;
+        }
+
+        // 2) 找第一个字段说明为空
+        const rows = document.querySelectorAll('#fieldsTableBody tr');
+        for (const row of rows) {
+            const fieldNameCell = row.querySelector('td:nth-child(1)');
+            const textarea = row.querySelector('.field-description');
+            const fieldName = fieldNameCell ? fieldNameCell.textContent : '';
+            if (textarea && !String(textarea.value || '').trim()) {
+                textarea.focus();
+                textarea.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                this.showMessage(`定位到：字段 ${fieldName}（待补充）`, 'info');
+                return;
+            }
+        }
+
+        this.showMessage('当前表暂无待补充项', 'success');
+    }
+
+    async generateMissingForCurrentTable() {
+        const tableName = document.getElementById('currentTableName')?.textContent || '';
+        if (!tableName) {
+            this.showMessage('请先打开一张表', 'warning');
+            return;
+        }
+        await this.generateMissingForTable(tableName, false, true);
+    }
+
+    async generateMissingForTable(tableName, saveToDb = false, applyToCurrentUI = false) {
+        if (!tableName) return;
+        const doSave = !!saveToDb;
+
+        try {
+            this.showLoading();
+            const dbDescription = document.getElementById('dbDescription')?.value?.trim() || '';
+
+            // 拉表详情，找缺失项
+            const detailResp = await fetch('/api/get_table_detail', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ ...this.currentConnection, table_name: tableName })
+            });
+            const detailResult = await detailResp.json();
+            if (!detailResult.success) {
+                this.showMessage(`获取表详情失败: ${detailResult.message}`, 'danger');
+                return;
+            }
+
+            const tableComment = (detailResult.table_info?.comment || '').trim();
+            const fields = Array.isArray(detailResult.fields) ? detailResult.fields : [];
+            const isCurrent = !!applyToCurrentUI && String(document.getElementById('currentTableName')?.textContent || '').trim() === String(tableName).trim();
+
+            // 默认用数据库注释判断缺失；若当前就在该表详情页，则优先以 UI 当前内容判断“缺失”
+            let missingFields = fields.filter(f => !String(f.comment || '').trim()).map(f => f.name);
+            let missingTable = !tableComment;
+            if (isCurrent) {
+                const uiTableDesc = String(document.getElementById('tableDescription')?.value || '').trim();
+                missingTable = !uiTableDesc;
+                const rows = document.querySelectorAll('#fieldsTableBody tr');
+                const uiMissing = [];
+                rows.forEach(row => {
+                    const nameCell = row.querySelector('td:nth-child(1)');
+                    const textarea = row.querySelector('.field-description');
+                    const name = String(nameCell ? nameCell.textContent : '').trim();
+                    const val = String(textarea ? textarea.value : '').trim();
+                    if (name && !val) uiMissing.push(name);
+                });
+                if (uiMissing.length > 0) missingFields = uiMissing;
+            }
+
+            if (!missingTable && missingFields.length === 0) {
+                this.showMessage(`表 ${tableName} 暂无缺失项`, 'success');
+                return;
+            }
+
+            // 生成表说明（缺失才生成）
+            let generatedTableDesc = tableComment;
+            if (missingTable) {
+                const resp = await fetch('/api/generate_table_description', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ ...this.currentConnection, table_name: tableName, db_description: dbDescription })
+                });
+                const r = await resp.json();
+                if (r.success) {
+                    generatedTableDesc = r.table_description || '';
+                } else {
+                    this.showMessage(`生成表说明失败: ${r.message}`, 'warning');
+                }
+            }
+
+            // 生成缺失字段说明（逐个生成，便于提示与可控）
+            const generatedFields = {};
+            for (let i = 0; i < missingFields.length; i++) {
+                const fieldName = missingFields[i];
+                this.showMessage(`生成缺失字段说明：${tableName}.${fieldName}（${i + 1}/${missingFields.length}）`, 'info');
+                const resp = await fetch('/api/generate_field_description', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ ...this.currentConnection, table_name: tableName, field_name: fieldName, db_description: dbDescription })
+                });
+                const r = await resp.json();
+                if (r.success) {
+                    generatedFields[fieldName] = r.field_description || '';
+                } else {
+                    this.showMessage(`生成字段 ${fieldName} 失败: ${r.message}`, 'warning');
+                }
+            }
+
+            // 如果当前就在该表详情页，把生成结果回填到 UI
+            if (isCurrent) {
+                const tableDescEl = document.getElementById('tableDescription');
+                if (missingTable && tableDescEl && generatedTableDesc) {
+                    tableDescEl.value = generatedTableDesc;
+                }
+                const rows = document.querySelectorAll('#fieldsTableBody tr');
+                rows.forEach(row => {
+                    const nameCell = row.querySelector('td:nth-child(1)');
+                    const textarea = row.querySelector('.field-description');
+                    const name = String(nameCell ? nameCell.textContent : '').trim();
+                    if (textarea && Object.prototype.hasOwnProperty.call(generatedFields, name) && String(generatedFields[name] || '').trim()) {
+                        textarea.value = generatedFields[name];
+                    }
+                });
+                this.initAutoResizeTextarea();
+                this.markDirty(tableName);
+            }
+
+            if (doSave) {
+                const field_descriptions = {};
+                fields.forEach(f => {
+                    const existing = String(f.comment || '').trim();
+                    field_descriptions[f.name] = existing || (generatedFields[f.name] || '');
+                });
+                const saveResp = await fetch('/api/save_table_comment', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        ...this.currentConnection,
+                        table_name: tableName,
+                        table_description: generatedTableDesc || '',
+                        field_descriptions
+                    })
+                });
+                const saveResult = await saveResp.json();
+                if (saveResult.success) {
+                    this.showMessage(`已保存 ${tableName} 的缺失注释到数据库`, 'success');
+                    this.clearDirty(tableName);
+                } else {
+                    this.showMessage(`保存失败: ${saveResult.message}`, 'danger');
+                }
+            } else {
+                this.showMessage(`已生成 ${tableName} 的缺失注释（未保存）`, 'success');
+            }
+
+            // 刷新缺失状态与标注清单
+            await this.getTablesList({ silent: true });
+            this.renderAnnotateMissingList();
+        } catch (error) {
+            this.showMessage(`补齐缺失失败: ${error.message}`, 'danger');
+        } finally {
+            this.hideLoading();
+        }
+    }
+
+    async generateAndSaveAllMissing() {
+        const missingTables = Array.from(this.missingDescTables);
+        if (missingTables.length === 0) {
+            this.showMessage('暂无待补充项', 'info');
+            return;
+        }
+        const ok = confirm(`确定要“一键生成并保存”全部待补充项吗？\n将处理 ${missingTables.length} 张表，可能需要较长时间。`);
+        if (!ok) return;
+
+        for (let i = 0; i < missingTables.length; i++) {
+            const t = missingTables[i];
+            this.showMessage(`批量处理：${t}（${i + 1}/${missingTables.length}）`, 'info');
+            // 不强制切换当前表，直接后台生成并保存
+            await this.generateMissingForTable(t, true, false);
+        }
+        this.showMessage('全部待补充项已处理完成', 'success');
     }
 
     // 生成文档
@@ -457,7 +1780,10 @@ class DatabaseDocGenerator {
         }
 
         try {
-            const config = this.getDbConfig();
+            this.setButtonLoading('generateBtn', true, '生成中...');
+            this.showMessage('正在准备生成文档...', 'info');
+            
+            const config = {...this.currentConnection};
             config.tables = Array.from(this.selectedTables);
             config.output_path = this.outputPath;
             config.file_name = this.fileName;
@@ -465,6 +1791,9 @@ class DatabaseDocGenerator {
             // 获取数据库功能介绍
             const dbDescription = document.getElementById('dbDescription').value.trim();
             config.db_description = dbDescription;
+            
+            // 添加保存的表数据
+            config.saved_table_data = this.getAllSavedTableData();
             
             // 增量更新相关配置
             if (this.incrementalMode) {
@@ -503,6 +1832,9 @@ class DatabaseDocGenerator {
             }
         } catch (error) {
             this.showMessage(`生成错误: ${error.message}`, 'danger');
+        } finally {
+            this.setButtonLoading('generateBtn', false);
+            this.updateGenerateButton();
         }
     }
 
@@ -510,7 +1842,9 @@ class DatabaseDocGenerator {
     showProgressSection() {
         const progressSection = document.getElementById('progressSection');
         progressSection.style.display = 'block';
-        progressSection.classList.add('slide-down');
+        this.setBottomDrawerReservedSpace(true);
+        // 默认收起一行
+        this.setProgressDrawerExpanded(false);
         
         // 重置进度条
         const progressBar = document.getElementById('progressBar');
@@ -528,6 +1862,39 @@ class DatabaseDocGenerator {
         
         // 清空日志
         document.getElementById('logsContainer').innerHTML = '';
+    }
+
+    // 隐藏进度区域
+    hideProgressSection() {
+        const progressSection = document.getElementById('progressSection');
+        progressSection.style.display = 'none';
+        this.setBottomDrawerReservedSpace(false);
+    }
+
+    // 更新进度显示（SSE progress 消息）
+    updateProgress(completed, total, currentTable = '') {
+        const progressBar = document.getElementById('progressBar');
+        const progressText = document.getElementById('progressText');
+        const currentStatus = document.getElementById('currentStatus');
+        const currentStatusText = document.getElementById('currentStatusText');
+
+        if (!progressBar || !progressText || !currentStatus || !currentStatusText) return;
+
+        const safeTotal = Number(total) || 0;
+        const safeCompleted = Number(completed) || 0;
+        const percent = safeTotal > 0 ? Math.min(100, Math.round((safeCompleted / safeTotal) * 100)) : 0;
+
+        progressBar.style.width = `${percent}%`;
+        progressBar.textContent = `${percent}%`;
+        progressBar.setAttribute('aria-valuenow', String(percent));
+        progressText.textContent = `${safeCompleted}/${safeTotal} 已完成`;
+
+        currentStatus.style.display = 'block';
+        if (currentTable) {
+            currentStatusText.textContent = `正在处理：${currentTable}（${safeCompleted}/${safeTotal}）`;
+        } else {
+            currentStatusText.textContent = `处理中（${safeCompleted}/${safeTotal}）`;
+        }
     }
 
     // 开始日志流
@@ -560,6 +1927,7 @@ class DatabaseDocGenerator {
                 // 生成完成
                 this.generatedFilePath = data.file_path;
                 this.showDownloadSection();
+                this.recordExportHistory(data.file_path);
                 this.eventSource.close();
                 this.eventSource = null;
                 
@@ -572,6 +1940,8 @@ class DatabaseDocGenerator {
                 logEntry.textContent = `错误: ${data.message}`;
                 logsContainer.appendChild(logEntry);
                 logsContainer.scrollTop = logsContainer.scrollHeight;
+                // 出错时自动展开，方便直接看到日志
+                this.setProgressDrawerExpanded(true);
                 
                 this.eventSource.close();
                 this.eventSource = null;
@@ -588,9 +1958,25 @@ class DatabaseDocGenerator {
     // 显示下载区域
     showDownloadSection() {
         document.querySelector('.progress-bar').style.width = '100%';
+        // 下载区出现时隐藏进度区，避免两个底部层叠
+        const progressSection = document.getElementById('progressSection');
+        if (progressSection) {
+            progressSection.style.display = 'none';
+        }
         const downloadSection = document.getElementById('downloadSection');
         downloadSection.style.display = 'block';
         downloadSection.classList.add('fade-in');
+        this.setBottomDrawerReservedSpace(true);
+
+        // 渲染下载抽屉信息
+        this.updateDownloadDrawer();
+    }
+
+    updateDownloadDrawer() {
+        const el = document.getElementById('downloadFilePath');
+        if (el) {
+            el.textContent = this.generatedFilePath || '';
+        }
     }
 
     // 下载文件
@@ -599,6 +1985,186 @@ class DatabaseDocGenerator {
             const encodedPath = encodeURIComponent(this.generatedFilePath);
             window.open(`/api/download/${encodedPath}`, '_blank');
         }
+    }
+
+    // 复制生成文件路径
+    async copyGeneratedFilePath() {
+        if (!this.generatedFilePath) {
+            this.showMessage('没有可复制的路径', 'warning');
+            return;
+        }
+        try {
+            await navigator.clipboard.writeText(this.generatedFilePath);
+            this.showMessage('路径已复制到剪贴板', 'success');
+        } catch (e) {
+            this.showMessage('复制失败，请手动复制', 'warning');
+        }
+    }
+
+    // 打开生成文件所在文件夹（需要后端在本机运行）
+    async openGeneratedFileFolder() {
+        if (!this.generatedFilePath) {
+            this.showMessage('没有可打开的路径', 'warning');
+            return;
+        }
+        try {
+            const resp = await fetch('/api/open_path', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ path: this.generatedFilePath, open_parent: true })
+            });
+            const result = await resp.json();
+            if (result.success) {
+                this.showMessage('已打开文件夹', 'success');
+            } else {
+                this.showMessage(`打开失败: ${result.message}`, 'warning');
+            }
+        } catch (e) {
+            this.showMessage(`打开失败: ${e.message}`, 'warning');
+        }
+    }
+
+    // =============== Phase4：导出历史（本地存储） ===============
+    getExportHistory() {
+        try {
+            const raw = localStorage.getItem('exportHistory');
+            const data = raw ? JSON.parse(raw) : [];
+            return Array.isArray(data) ? data : [];
+        } catch {
+            return [];
+        }
+    }
+
+    saveExportHistory(list) {
+        try {
+            localStorage.setItem('exportHistory', JSON.stringify(list || []));
+        } catch {
+            // ignore
+        }
+    }
+
+    recordExportHistory(filePath) {
+        if (!filePath) return;
+        const now = Date.now();
+        const entry = {
+            path: filePath,
+            file_name: (filePath.split(/[\\/]/).pop() || ''),
+            time: now,
+            selected_tables: Array.from(this.selectedTables || []),
+            selected_count: (this.selectedTables && this.selectedTables.size) ? this.selectedTables.size : 0,
+            incremental_mode: !!this.incrementalMode,
+        };
+        const list = this.getExportHistory();
+        // 去重（同路径）
+        const filtered = list.filter(x => x && x.path !== entry.path);
+        filtered.unshift(entry);
+        // 限制长度
+        const capped = filtered.slice(0, 20);
+        this.saveExportHistory(capped);
+        this.renderExportHistory();
+    }
+
+    clearExportHistory() {
+        const ok = confirm('确定要清空导出历史吗？');
+        if (!ok) return;
+        this.saveExportHistory([]);
+        this.renderExportHistory();
+        this.showMessage('已清空导出历史', 'success');
+    }
+
+    renderExportHistory() {
+        const container = document.getElementById('exportHistoryList');
+        if (!container) return;
+        const list = this.getExportHistory();
+        if (list.length === 0) {
+            container.innerHTML = `
+                <div class="text-center text-muted p-3">
+                    <i class="fas fa-inbox mb-2 opacity-50"></i>
+                    <div class="small">暂无导出历史</div>
+                </div>
+            `;
+            return;
+        }
+
+        container.innerHTML = list.map(item => {
+            const name = this.escapeHtml(item.file_name || '');
+            const path = this.escapeHtml(item.path || '');
+            const time = item.time ? new Date(item.time).toLocaleString('zh-CN') : '';
+            const count = Number(item.selected_count || 0);
+            const inc = item.incremental_mode ? '<span class="badge bg-info text-dark ms-2">增量</span>' : '';
+            return `
+                <div class="list-group-item d-flex justify-content-between align-items-center gap-2">
+                    <div class="text-truncate">
+                        <div class="d-flex align-items-center gap-2">
+                            <i class="fas fa-file-alt text-primary"></i>
+                            <strong class="text-truncate">${name}</strong>
+                            <span class="badge bg-secondary">表 ${count}</span>
+                            ${inc}
+                        </div>
+                        <div class="small text-muted mt-1 text-truncate">${path}</div>
+                        <div class="small text-muted">${time}</div>
+                    </div>
+                    <div class="btn-group btn-group-sm flex-shrink-0">
+                        <button type="button" class="btn btn-outline-secondary export-history-preview" data-path="${path}">
+                            <i class="fas fa-eye"></i>
+                        </button>
+                        <button type="button" class="btn btn-outline-primary export-history-download" data-path="${path}">
+                            <i class="fas fa-download"></i>
+                        </button>
+                        <button type="button" class="btn btn-outline-secondary export-history-copy" data-path="${path}">
+                            <i class="fas fa-copy"></i>
+                        </button>
+                        <button type="button" class="btn btn-outline-secondary export-history-open-folder" data-path="${path}">
+                            <i class="fas fa-folder-open"></i>
+                        </button>
+                    </div>
+                </div>
+            `;
+        }).join('');
+
+        container.querySelectorAll('.export-history-preview').forEach(btn => {
+            btn.addEventListener('click', async () => {
+                const path = btn.getAttribute('data-path');
+                this.generatedFilePath = path;
+                this.updateDownloadDrawer();
+                await this.previewDocument();
+            });
+        });
+        container.querySelectorAll('.export-history-download').forEach(btn => {
+            btn.addEventListener('click', () => {
+                const path = btn.getAttribute('data-path');
+                const encodedPath = encodeURIComponent(path);
+                window.open(`/api/download/${encodedPath}`, '_blank');
+            });
+        });
+        container.querySelectorAll('.export-history-copy').forEach(btn => {
+            btn.addEventListener('click', async () => {
+                const path = btn.getAttribute('data-path');
+                try {
+                    await navigator.clipboard.writeText(path);
+                    this.showMessage('路径已复制到剪贴板', 'success');
+                } catch {
+                    this.showMessage('复制失败，请手动复制', 'warning');
+                }
+            });
+        });
+        container.querySelectorAll('.export-history-open-folder').forEach(btn => {
+            btn.addEventListener('click', async () => {
+                const path = btn.getAttribute('data-path');
+                try {
+                    const resp = await fetch('/api/open_path', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ path, open_parent: true })
+                    });
+                    const result = await resp.json();
+                    if (result.success) this.showMessage('已打开文件夹', 'success');
+                    else this.showMessage(`打开失败: ${result.message}`, 'warning');
+                } catch (e) {
+                    this.showMessage(`打开失败: ${e.message}`, 'warning');
+                }
+            });
+        });
     }
 
     // 预览文档
@@ -807,10 +2373,94 @@ class DatabaseDocGenerator {
             this.eventSource = null;
         }
     }
+    
+    // 切换左侧面板的折叠状态
+    toggleLeftPanel() {
+        // 已移除左侧折叠功能（产品布局简化：左侧导航固定展示）
+    }
+    
+    // 切换右侧面板的折叠状态
+    toggleRightPanel() {
+        const rightColumn = document.getElementById('rightColumn');
+        const collapseRightBtn = document.getElementById('collapseRightBtn');
+        const isCollapsed = rightColumn.classList.contains('collapsed');
+        // 统一交给 setRightPanelCollapsed 处理（含迷你操作条）
+        this.setRightPanelCollapsed(!isCollapsed);
+    }
+    
+    // 更新中间列的样式，根据左侧和右侧列的折叠状态
+    updateMiddleColumnStyle() {
+        const rightColumn = document.getElementById('rightColumn');
+        const middleColumn = document.querySelector('.middle-column');
+        
+        // 移除所有中间列的样式类
+        middleColumn.classList.remove('right-collapsed');
+        const isRightCollapsed = rightColumn.classList.contains('collapsed');
+
+        if (isRightCollapsed) {
+            // 右侧折叠：中间扩展占满剩余空间
+            middleColumn.classList.add('right-collapsed');
+        }
+    }
+
+    // 检查表和字段的描述状态
+    async checkTableDescriptionStatus(tableName, listItem) {
+        try {
+            const config = {...this.currentConnection};
+            config.table_name = tableName;
+            
+            const response = await fetch('/api/get_table_detail', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify(config)
+            });
+
+            const result = await response.json();
+            if (result.success) {
+                const tableInfo = result.table_info;
+                const fields = result.fields;
+                
+                // 检查表说明是否为空
+                const hasEmptyTableDescription = !tableInfo.comment || tableInfo.comment.trim() === '';
+                
+                // 检查字段说明是否有空值
+                const hasEmptyFieldDescriptions = fields.some(field => !field.comment || field.comment.trim() === '');
+                
+                const isMissing = hasEmptyTableDescription || hasEmptyFieldDescriptions;
+                listItem.dataset.missingDesc = isMissing ? '1' : '0';
+                listItem.classList.toggle('table-missing-desc', isMissing);
+
+                if (isMissing) {
+                    this.missingDescTables.add(tableName);
+                } else {
+                    this.missingDescTables.delete(tableName);
+                }
+
+                // 渲染“待补充”标识
+                const flags = listItem.querySelector('.table-flags');
+                if (flags) {
+                    flags.innerHTML = isMissing ? '<span class="badge bg-danger">待补充</span>' : '';
+                }
+
+                this.updateTablesStats();
+                this.applyTableFilters();
+            }
+        } catch (error) {
+            console.error(`检查表描述状态失败: ${error.message}`);
+        }
+    }
 
     // 初始化文档查看器
     initDocumentViewer() {
+        // 检查文档查看器相关元素是否存在
         const dropZone = document.getElementById('dropZone');
+        if (!dropZone) {
+            // 如果文档查看器相关元素不存在，则跳过初始化
+            return;
+        }
+
         const fileInput = document.getElementById('fileInput');
         const selectFileBtn = document.getElementById('selectFileBtn');
         const clearFileBtn = document.getElementById('clearFileBtn');
@@ -843,50 +2493,66 @@ class DatabaseDocGenerator {
         });
 
         // 点击选择文件
-        selectFileBtn.addEventListener('click', () => {
-            fileInput.click();
-        });
-
-        dropZone.addEventListener('click', () => {
-            fileInput.click();
-        });
+        if (selectFileBtn) {
+            selectFileBtn.addEventListener('click', () => {
+                if (fileInput) {
+                    fileInput.click();
+                }
+            });
+        }
 
         // 文件选择事件
-        fileInput.addEventListener('change', (e) => {
-            if (e.target.files.length > 0) {
-                this.handleFileUpload(e.target.files[0]);
-            }
-        });
+        if (fileInput) {
+            fileInput.addEventListener('change', (e) => {
+                if (e.target.files.length > 0) {
+                    this.handleFileUpload(e.target.files[0]);
+                }
+            });
+        }
 
         // 清除文件
-        clearFileBtn.addEventListener('click', () => {
-            this.clearFile();
-        });
+        if (clearFileBtn) {
+            clearFileBtn.addEventListener('click', () => {
+                this.clearFile();
+            });
+        }
 
         // 复制内容
-        copyContentBtn.addEventListener('click', () => {
-            this.copyContent();
-        });
+        if (copyContentBtn) {
+            copyContentBtn.addEventListener('click', () => {
+                this.copyContent();
+            });
+        }
 
         // 下载文件
-        downloadContentBtn.addEventListener('click', () => {
-            this.downloadCurrentFile();
-        });
+        if (downloadContentBtn) {
+            downloadContentBtn.addEventListener('click', () => {
+                this.downloadCurrentFile();
+            });
+        }
 
         // 全屏预览按钮
         const fullscreenBtn = document.getElementById('fullscreenBtn');
-        fullscreenBtn.addEventListener('click', () => {
-            this.openFullscreenPreview();
-        });
+        if (fullscreenBtn) {
+            fullscreenBtn.addEventListener('click', () => {
+                this.openFullscreenPreview();
+            });
+        }
 
         // 全屏模式下的按钮
-        document.getElementById('fullscreenCopyBtn').addEventListener('click', () => {
-            this.copyCurrentContent();
-        });
+        const fullscreenCopyBtn = document.getElementById('fullscreenCopyBtn');
+        if (fullscreenCopyBtn) {
+            fullscreenCopyBtn.addEventListener('click', () => {
+                this.copyCurrentContent();
+            });
+        }
 
-        document.getElementById('fullscreenDownloadBtn').addEventListener('click', () => {
-            this.downloadCurrentContent();
-        });
+        const fullscreenDownloadBtn = document.getElementById('fullscreenDownloadBtn');
+        if (fullscreenDownloadBtn) {
+            fullscreenDownloadBtn.addEventListener('click', () => {
+                this.downloadCurrentContent();
+            });
+        }
 
         // 最近打开文件相关
         this.initRecentFiles();
@@ -1389,26 +3055,21 @@ class DatabaseDocGenerator {
                     console.log('方法2 - 通过索引查找:', index, '找到:', !!targetContent);
                 }
                 
-                // 方法3：通过aria-controls属性
+                // 方法3：遍历查找
                 if (!targetContent) {
-                    const ariaControls = button.getAttribute('aria-controls');
-                    if (ariaControls) {
-                        targetContent = contentContainer.querySelector(`#${ariaControls}`);
-                        console.log('方法3 - 通过aria-controls查找:', ariaControls, '找到:', !!targetContent);
+                    const targetId = button.getAttribute('data-bs-target');
+                    if (targetId) {
+                        const targetElementId = targetId.startsWith('#') ? targetId.substring(1) : targetId;
+                        targetContent = Array.from(allContents).find(content => content.id === targetElementId);
+                        console.log('方法3 - 遍历查找:', targetElementId, '找到:', !!targetContent);
                     }
                 }
                 
                 if (targetContent) {
                     targetContent.classList.add('active');
-                    console.log('成功激活内容:', targetContent.id, '内容长度:', targetContent.innerHTML.length);
+                    console.log('激活内容元素:', targetContent.id);
                 } else {
-                    console.error('无法找到目标内容！');
-                    console.log('选项卡信息:', {
-                        index: index,
-                        targetId: targetId,
-                        ariaControls: button.getAttribute('aria-controls'),
-                        allContentIds: Array.from(allContents).map(c => c.id)
-                    });
+                    console.error('未找到目标内容元素:', button.getAttribute('data-bs-target'));
                 }
             };
             
@@ -1416,1949 +3077,285 @@ class DatabaseDocGenerator {
         });
     }
 
-    // 打开全屏预览（从文档查看器）
+    // 处理选项卡点击
+    handleTabClick(e) {
+        e.preventDefault();
+        console.log('handleTabClick called');
+    }
+
+    // 打开全屏预览
     openFullscreenPreview() {
         if (!this.currentFileContent) {
             this.showMessage('没有可预览的内容', 'warning');
             return;
         }
-
-        this.showFullscreenModal(this.currentFileContent);
+        
+        // 解析内容为选项卡数据
+        const tabsData = this.parseMarkdownToTabs(this.currentFileContent);
+        
+        // 保存当前内容到localStorage，以便在全屏页面中访问
+        localStorage.setItem('fullscreenPreviewContent', JSON.stringify(tabsData));
+        localStorage.setItem('fullscreenPreviewFileName', this.currentFile ? this.currentFile.name : '未命名文档.md');
+        
+        // 打开全屏预览页面
+        window.open('/fullscreen', '_blank');
     }
 
-    // 从预览模态框打开全屏预览（从生成器预览）
+    // 从预览打开全屏预览
     openFullscreenFromPreview() {
         if (!this.currentGeneratedContent) {
             this.showMessage('没有可预览的内容', 'warning');
             return;
         }
-
-        // 关闭当前预览模态框
-        const previewModal = bootstrap.Modal.getInstance(document.getElementById('previewModal'));
-        if (previewModal) {
-            previewModal.hide();
-        }
-
-        this.showFullscreenModal(this.currentGeneratedContent);
+        
+        // 解析内容为选项卡数据
+        const tabsData = this.parseMarkdownToTabs(this.currentGeneratedContent);
+        
+        // 保存当前内容到localStorage，以便在全屏页面中访问
+        localStorage.setItem('fullscreenPreviewContent', JSON.stringify(tabsData));
+        localStorage.setItem('fullscreenPreviewFileName', this.generatedFilePath ? this.generatedFilePath.split('/').pop() : '生成的文档.md');
+        
+        // 打开全屏预览页面
+        window.open('/fullscreen', '_blank');
     }
 
-    // 显示全屏模态框
-    showFullscreenModal(content) {
-        const modal = new bootstrap.Modal(document.getElementById('fullscreenModal'));
-        modal.show();
-
-        // 等待模态框完全显示后再渲染内容
-        setTimeout(() => {
-            // 解析内容
-            const tabsData = this.parseMarkdownToTabs(content);
-            console.log('全屏预览解析到的表格数量:', tabsData.tables.length);
-            console.log('表格信息:', tabsData.tables.map(t => ({ name: t.name, contentLength: t.content.length })));
-            
-            if (tabsData.tables.length > 1) {
-                // 多表格：显示选项卡（事件绑定在renderTabsInterface中已经处理）
-                this.renderTabsInterface(tabsData, 'fullscreenContent', 'fullscreenTabsContainer', 'fullscreenTabs');
-            } else {
-                // 单表格或无表格：直接显示内容
-                const htmlContent = this.markdownToHtml(content);
-                document.getElementById('fullscreenContent').innerHTML = htmlContent;
-                document.getElementById('fullscreenTabsContainer').style.display = 'none';
-            }
-        }, 200);
-    }
-
-    // 复制当前内容（智能判断来源）
+    // 复制当前内容（用于全屏模式）
     copyCurrentContent() {
-        const content = this.currentFileContent || this.currentGeneratedContent;
-        if (!content) {
-            this.showMessage('没有可复制的内容', 'warning');
-            return;
-        }
-
-        navigator.clipboard.writeText(content).then(() => {
-            this.showMessage('内容已复制到剪贴板', 'success');
-        }).catch(() => {
-            // 降级方案：使用textarea
-            const textarea = document.createElement('textarea');
-            textarea.value = content;
-            document.body.appendChild(textarea);
-            textarea.select();
-            try {
-                document.execCommand('copy');
+        const content = localStorage.getItem('fullscreenPreviewContent');
+        if (content) {
+            const parsedContent = JSON.parse(content);
+            let fullContent = '';
+            parsedContent.tables.forEach(table => {
+                fullContent += `## ${table.name}\n${table.content}\n`;
+            });
+            
+            navigator.clipboard.writeText(fullContent).then(() => {
                 this.showMessage('内容已复制到剪贴板', 'success');
-            } catch (err) {
+            }).catch(() => {
                 this.showMessage('复制失败，请手动复制', 'danger');
-            }
-            document.body.removeChild(textarea);
-        });
+            });
+        } else {
+            this.showMessage('没有可复制的内容', 'warning');
+        }
     }
 
-    // 下载当前内容（智能判断来源）
+    // 下载当前内容（用于全屏模式）
     downloadCurrentContent() {
-        const content = this.currentFileContent || this.currentGeneratedContent;
-        if (!content) {
+        const content = localStorage.getItem('fullscreenPreviewContent');
+        const fileName = localStorage.getItem('fullscreenPreviewFileName') || '未命名文档.md';
+        
+        if (content) {
+            const parsedContent = JSON.parse(content);
+            let fullContent = '';
+            parsedContent.tables.forEach(table => {
+                fullContent += `## ${table.name}\n${table.content}\n`;
+            });
+            
+            const blob = new Blob([fullContent], { type: 'text/markdown' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = fileName;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+            
+            this.showMessage('文件下载已开始', 'success');
+        } else {
             this.showMessage('没有可下载的内容', 'warning');
-            return;
         }
-
-        const fileName = this.currentFile ? this.currentFile.name : `database_docs_${new Date().toISOString().slice(0, 19).replace(/[:]/g, '-')}.md`;
-        
-        const blob = new Blob([content], { type: 'text/markdown' });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = fileName;
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        URL.revokeObjectURL(url);
-        
-        this.showMessage('文件下载已开始', 'success');
     }
 
     // 初始化最近打开文件
     initRecentFiles() {
-        // 清除历史按钮
-        document.getElementById('clearHistoryBtn').addEventListener('click', () => {
-            this.clearAllRecentFiles();
-        });
-        
-        // 初始化显示
-        this.loadRecentFiles();
+        // 实现最近打开文件功能
         this.updateRecentFilesDisplay();
     }
 
-    // 保存文件到最近打开列表
+    // 保存最近打开的文件
     saveRecentFile(file, content) {
-        const recentFiles = this.getRecentFiles();
+        // 实现保存最近打开文件功能
+        const recentFiles = JSON.parse(localStorage.getItem('recentFiles') || '[]');
         
-        // 创建文件记录
-        const fileRecord = {
-            id: Date.now() + '_' + Math.random().toString(36).substr(2, 9),
+        // 检查文件是否已存在
+        const existingIndex = recentFiles.findIndex(item => item.name === file.name);
+        if (existingIndex !== -1) {
+            // 如果已存在，移除旧条目
+            recentFiles.splice(existingIndex, 1);
+        }
+        
+        // 添加到最近打开文件列表开头
+        recentFiles.unshift({
             name: file.name,
+            path: file.name, // 仅保存文件名，不保存完整路径
             size: file.size,
             lastModified: file.lastModified,
-            content: content,
-            openedAt: new Date().toISOString(),
-            preview: this.getContentPreview(content)
-        };
+            preview: content.substring(0, 200) + '...' // 保存预览内容
+        });
         
-        // 移除同名文件（如果存在）
-        const filteredFiles = recentFiles.filter(f => f.name !== file.name);
+        // 限制最近文件数量为10个
+        if (recentFiles.length > 10) {
+            recentFiles.pop();
+        }
         
-        // 添加新文件到开头
-        filteredFiles.unshift(fileRecord);
-        
-        // 限制最多3个文件
-        const limitedFiles = filteredFiles.slice(0, 3);
-        
-        // 保存到localStorage
-        localStorage.setItem('recentMdFiles', JSON.stringify(limitedFiles));
+        localStorage.setItem('recentFiles', JSON.stringify(recentFiles));
         
         // 更新显示
         this.updateRecentFilesDisplay();
     }
 
-    // 获取最近打开的文件
-    getRecentFiles() {
-        try {
-            const saved = localStorage.getItem('recentMdFiles');
-            return saved ? JSON.parse(saved) : [];
-        } catch (error) {
-            console.error('加载最近文件失败:', error);
-            return [];
-        }
-    }
-
-    // 加载最近打开的文件
-    loadRecentFiles() {
-        this.recentFiles = this.getRecentFiles();
-    }
-
-    // 更新最近打开文件的显示
+    // 更新最近打开文件显示
     updateRecentFilesDisplay() {
         const recentFilesList = document.getElementById('recentFilesList');
-        const noRecentFiles = document.getElementById('noRecentFiles');
+        if (!recentFilesList) return;
         
-        const recentFiles = this.getRecentFiles();
+        const recentFiles = JSON.parse(localStorage.getItem('recentFiles') || '[]');
         
         if (recentFiles.length === 0) {
+            document.getElementById('noRecentFiles').style.display = 'block';
             recentFilesList.innerHTML = '';
-            noRecentFiles.style.display = 'block';
             return;
         }
         
-        noRecentFiles.style.display = 'none';
+        document.getElementById('noRecentFiles').style.display = 'none';
         
-        // 生成文件列表HTML
-        const filesHtml = recentFiles.map((file, index) => {
-            const openedTime = new Date(file.openedAt).toLocaleString('zh-CN');
-            const fileSize = this.formatFileSize(file.size);
-            
-            return `
-                <div class="recent-file-item" data-file-id="${file.id}">
-                    <div class="recent-file-header">
-                        <div class="recent-file-name">
-                            <i class="fas fa-file-alt"></i>
-                            ${file.name}
-                        </div>
-                        <button class="recent-file-remove" data-file-id="${file.id}" title="删除此记录">
-                            <i class="fas fa-times"></i>
-                        </button>
-                    </div>
-                    <div class="recent-file-info">
-                        <div class="recent-file-size">${fileSize}</div>
-                        <div class="recent-file-time">${openedTime}</div>
-                    </div>
-                    <div class="recent-file-preview">
-                        <div class="recent-file-preview-text">${file.preview}</div>
+        recentFilesList.innerHTML = recentFiles.map(file => `
+            <div class="recent-file-item" data-file-name="${file.name}">
+                <div class="file-info">
+                    <i class="fas fa-file-alt text-primary"></i>
+                    <div>
+                        <strong>${file.name}</strong>
+                        <small class="d-block text-muted">
+                            ${this.formatFileSize(file.size)} | ${new Date(file.lastModified).toLocaleString('zh-CN')}
+                        </small>
                     </div>
                 </div>
-            `;
-        }).join('');
-        
-        recentFilesList.innerHTML = filesHtml;
-        
-        // 绑定事件
-        this.bindRecentFileEvents();
-    }
-
-    // 绑定最近文件事件
-    bindRecentFileEvents() {
-        const recentFilesList = document.getElementById('recentFilesList');
-        
-        // 点击文件打开
-        recentFilesList.addEventListener('click', (e) => {
-            const fileItem = e.target.closest('.recent-file-item');
-            const removeBtn = e.target.closest('.recent-file-remove');
-            
-            if (removeBtn) {
-                // 删除单个文件
-                const fileId = removeBtn.dataset.fileId;
-                this.removeRecentFile(fileId);
-                e.stopPropagation();
-                return;
-            }
-            
-            if (fileItem) {
-                // 打开文件
-                const fileId = fileItem.dataset.fileId;
-                this.openRecentFile(fileId);
-            }
-        });
+                <div class="file-actions">
+                    <button class="btn btn-sm btn-outline-secondary" onclick="dbDocGenerator.openRecentFile('${file.name}')">
+                        <i class="fas fa-eye"></i> 查看
+                    </button>
+                </div>
+            </div>
+        `).join('');
     }
 
     // 打开最近文件
-    openRecentFile(fileId) {
-        const recentFiles = this.getRecentFiles();
-        const file = recentFiles.find(f => f.id === fileId);
-        
-        if (!file) {
-            this.showMessage('文件记录不存在', 'warning');
-            return;
-        }
-        
-        // 模拟文件对象
-        const fileObj = {
-            name: file.name,
-            size: file.size,
-            lastModified: file.lastModified
-        };
-        
-        // 设置当前文件
-        this.currentFile = fileObj;
-        this.currentFileContent = file.content;
-        
-        // 显示文件信息和预览
-        this.displayFileInfo(fileObj);
-        this.previewMarkdown(file.content);
-        
-        // 重新保存到最近打开（更新打开时间）
-        this.saveRecentFile(fileObj, file.content);
-        
-        this.showMessage(`已打开文件: ${file.name}`, 'success');
+    openRecentFile(fileName) {
+        // 实现打开最近文件功能
+        // 注意：这里我们没有保存完整文件路径，所以只能提示用户重新选择文件
+        this.showMessage('请重新选择文件以查看完整内容', 'info');
+        document.getElementById('fileInput').click();
     }
 
-    // 删除单个最近文件记录
-    removeRecentFile(fileId) {
-        const recentFiles = this.getRecentFiles();
-        const filteredFiles = recentFiles.filter(f => f.id !== fileId);
-        
-        localStorage.setItem('recentMdFiles', JSON.stringify(filteredFiles));
-        
-        // 添加删除动画
-        const fileItem = document.querySelector(`[data-file-id="${fileId}"]`);
-        if (fileItem) {
-            fileItem.classList.add('removing');
-            setTimeout(() => {
-                this.updateRecentFilesDisplay();
-            }, 300);
-        }
-        
-        this.showMessage('文件记录已删除', 'info');
-    }
-
-    // 清除所有最近文件记录
-    clearAllRecentFiles() {
-        if (confirm('确定要清除所有最近打开的文件记录吗？')) {
-            localStorage.removeItem('recentMdFiles');
-            this.updateRecentFilesDisplay();
-            this.showMessage('所有历史记录已清除', 'info');
-        }
-    }
-
-    // 获取内容预览
-    getContentPreview(content) {
-        // 移除markdown语法，获取纯文本预览
-        const plainText = content
-            .replace(/#{1,6}\s+/g, '') // 移除标题标记
-            .replace(/\*\*(.*?)\*\*/g, '$1') // 移除粗体标记
-            .replace(/\*(.*?)\*/g, '$1') // 移除斜体标记
-            .replace(/`(.*?)`/g, '$1') // 移除代码标记
-            .replace(/\[(.*?)\]\(.*?\)/g, '$1') // 移除链接标记
-            .replace(/\|/g, ' ') // 移除表格分隔符
-            .replace(/\n+/g, ' ') // 替换换行为空格
-            .replace(/\s+/g, ' ') // 合并多个空格
-            .trim();
-        
-        // 返回前150个字符作为预览
-        return plainText.length > 150 ? plainText.substring(0, 150) + '...' : plainText;
-    }
-
-    // ==================== 连接历史管理功能 ====================
-    
-    // 加载连接历史
-    loadConnectionHistory() {
-        const history = this.getConnectionHistory();
-        const select = document.getElementById('connectionHistory');
-        
-        // 清空现有选项（保留默认选项）
-        select.innerHTML = '<option value="">选择已保存的连接...</option>';
-        
-        // 添加历史连接选项
-        history.forEach(conn => {
-            const option = document.createElement('option');
-            option.value = conn.id;
-            option.textContent = conn.name;
-            select.appendChild(option);
-        });
-    }
-
-    // 获取连接历史记录
-    getConnectionHistory() {
-        const history = localStorage.getItem('dbConnectionHistory');
-        return history ? JSON.parse(history) : [];
-    }
-
-    // 保存连接历史记录
-    saveConnectionHistory(history) {
-        localStorage.setItem('dbConnectionHistory', JSON.stringify(history));
-    }
-
-    // 保存连接到历史记录（去重处理）
-    saveConnectionToHistory(config) {
-        const history = this.getConnectionHistory();
-        
-        // 生成连接的唯一标识（不包含密码）
-        const connectionKey = `${config.db_type}://${config.user}@${config.host}:${config.port}/${config.database}`;
-        
-        // 检查是否已存在相同连接
-        const existingIndex = history.findIndex(conn => 
-            conn.dbType === config.db_type &&
-            conn.host === config.host &&
-            conn.port === config.port &&
-            conn.user === config.user &&
-            conn.database === config.database
-        );
-
-        const now = Date.now();
-        
-        if (existingIndex !== -1) {
-            // 更新现有连接的最后使用时间
-            history[existingIndex].lastUsed = now;
-        } else {
-            // 添加新连接
-            const newConnection = {
-                id: `conn_${now}`,
-                name: this.generateConnectionName(config),
-                dbType: config.db_type,
-                host: config.host,
-                port: config.port,
-                user: config.user,
-                database: config.database,
-                lastUsed: now,
-                createdAt: now
-            };
-            
-            history.unshift(newConnection); // 添加到开头
-            
-            // 限制历史记录数量（最多保存20个）
-            if (history.length > 20) {
-                history.splice(20);
-            }
-        }
-
-        // 按最后使用时间排序
-        history.sort((a, b) => b.lastUsed - a.lastUsed);
-        
-        this.saveConnectionHistory(history);
-        this.loadConnectionHistory();
-    }
-
-    // 生成连接名称
-    generateConnectionName(config) {
-        const dbTypeMap = {
-            'mysql': 'MySQL',
-            'sqlserver': 'SQL Server'
-        };
-        
-        const dbTypeName = dbTypeMap[config.db_type] || config.db_type;
-        return `${dbTypeName} - ${config.database}@${config.host}`;
-    }
-
-    // 从历史记录加载连接配置
-    loadConnectionFromHistory(connectionId) {
-        if (!connectionId) {
-            // 清空删除按钮状态
-            document.getElementById('deleteConnectionBtn').disabled = true;
-            return;
-        }
-
-        const history = this.getConnectionHistory();
-        const connection = history.find(conn => conn.id === connectionId);
-        
-        if (connection) {
-            // 填充表单
-            document.getElementById('dbType').value = connection.dbType;
-            document.getElementById('host').value = connection.host;
-            document.getElementById('port').value = connection.port;
-            document.getElementById('user').value = connection.user;
-            document.getElementById('database').value = connection.database;
-            
-            // 启用删除按钮
-            document.getElementById('deleteConnectionBtn').disabled = false;
-            
-            // 更新最后使用时间
-            connection.lastUsed = Date.now();
-            this.saveConnectionHistory(history);
-            
-            this.showMessage(`已加载连接配置: ${connection.name}`, 'info');
-        }
-    }
-
-    // 删除选中的连接
-    deleteSelectedConnection() {
-        const select = document.getElementById('connectionHistory');
-        const connectionId = select.value;
-        
-        if (!connectionId) return;
-
-        const history = this.getConnectionHistory();
-        const connection = history.find(conn => conn.id === connectionId);
-        
-        if (connection && confirm(`确定要删除连接 "${connection.name}" 吗？`)) {
-            const newHistory = history.filter(conn => conn.id !== connectionId);
-            this.saveConnectionHistory(newHistory);
-            this.loadConnectionHistory();
-            
-            // 清空表单和重置按钮状态
-            this.clearConnectionForm();
-            this.showMessage('连接已删除', 'info');
-        }
-    }
-
-    // 选择输出路径
-    selectOutputPath() {
-        // 优先调用后端系统文件夹选择对话框
-        this.openSystemFolderPicker();
-    }
-
-    async openSystemFolderPicker() {
-        try {
-            const resp = await fetch('/api/select_directory');
-            if (!resp.ok) throw new Error('接口调用失败');
-            const result = await resp.json();
-            if (result.success && result.path) {
-                this.outputPath = result.path;
-                document.getElementById('outputPath').value = this.outputPath;
-                this.updateGenerateButton();
-                this.showMessage(`已选择保存路径: ${this.outputPath}`, 'success');
-            } else if (result.message === '用户取消') {
-                this.showMessage('已取消选择路径', 'info');
-            } else {
-                // 兜底回退到旧的前端对话框
-                this.showImprovedPathSelectionDialog();
-            }
-        } catch (e) {
-            // 兜底回退到旧的前端对话框
-            this.showImprovedPathSelectionDialog();
-        }
-    }
-
-    async selectDirectoryModern() {
-        // 由于浏览器安全限制，无法获取完整路径，改为提供默认路径选项
-        this.showPathSelectionDialog();
-    }
-
-    selectDirectoryFallback() {
-        // 同样改为路径选择对话框
-        this.showPathSelectionDialog();
-    }
-
-    showPathSelectionDialog() {
-        // 创建路径选择对话框
-        const modal = document.createElement('div');
-        modal.className = 'modal fade';
-        modal.innerHTML = `
-            <div class="modal-dialog">
-                <div class="modal-content">
-                    <div class="modal-header">
-                        <h5 class="modal-title">选择文档保存路径</h5>
-                        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
-                    </div>
-                    <div class="modal-body">
-                        <div class="mb-3">
-                            <label class="form-label">请选择或输入完整的保存路径：</label>
-                            <div class="d-grid gap-2 mb-3">
-                                <button type="button" class="btn btn-outline-primary" onclick="this.selectDefaultPath()">
-                                    使用默认路径 (./output)
-                                </button>
-                                <button type="button" class="btn btn-outline-secondary" onclick="this.selectCurrentPath()">
-                                    使用当前目录 (.)
-                                </button>
-                            </div>
-                            <div class="input-group">
-                                <span class="input-group-text">自定义路径</span>
-                                <input type="text" class="form-control" id="customPathInput" 
-                                       placeholder="例如: E:\\Documents\\DB文档" 
-                                       value="${this.outputPath || ''}">
-                            </div>
-                            <div class="form-text">
-                                提示：可以使用相对路径（如 ./output）或绝对路径（如 E:\\Documents\\DB文档）
-                            </div>
-                        </div>
-                    </div>
-                    <div class="modal-footer">
-                        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
-                        <button type="button" class="btn btn-primary" onclick="this.confirmPathSelection()">确认</button>
-                    </div>
-                </div>
-            </div>
-        `;
-        
-        document.body.appendChild(modal);
-        
-        // 绑定事件
-        const self = this;
-        modal.querySelector('.btn-outline-primary').onclick = () => self.selectDefaultPath();
-        modal.querySelector('.btn-outline-secondary').onclick = () => self.selectCurrentPath();
-        modal.querySelector('.btn-primary').onclick = () => self.confirmPathSelection();
-        
-        // 显示模态框
-        const bsModal = new bootstrap.Modal(modal);
-        bsModal.show();
-        
-        // 模态框关闭后清理
-        modal.addEventListener('hidden.bs.modal', () => {
-            document.body.removeChild(modal);
-        });
-    }
-
-    selectDefaultPath() {
-        document.getElementById('customPathInput').value = './output';
-    }
-
-    selectCurrentPath() {
-        document.getElementById('customPathInput').value = '.';
-    }
-
-    confirmPathSelection() {
-        const customPath = document.getElementById('customPathInput').value.trim();
-        if (customPath) {
-            this.outputPath = customPath;
-            document.getElementById('outputPath').value = this.outputPath;
-            this.updateGenerateButton();
-            this.showMessage(`已设置保存路径: ${this.outputPath}`, 'success');
-            
-            // 关闭模态框
-            const modal = document.querySelector('.modal.show');
-            if (modal) {
-                bootstrap.Modal.getInstance(modal).hide();
-            }
-        } else {
-             this.showMessage('请输入有效的路径', 'warning');
-         }
-     }
-
-    // 生成文件名
-    generateFileName() {
-        const dbName = document.getElementById('database').value || 'database';
-        const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-        this.fileName = `${dbName}_文档_${timestamp}.md`;
-        document.getElementById('fileName').value = this.fileName;
-    }
-
-    // 更新进度
-    updateProgress(completed, total, currentTable = '') {
-        this.completedTables = completed;
-        this.totalTables = total;
-        
-        const percentage = total > 0 ? Math.round((completed / total) * 100) : 0;
-        
-        // 更新进度条
-        const progressBar = document.getElementById('progressBar');
-        progressBar.style.width = `${percentage}%`;
-        progressBar.textContent = `${percentage}%`;
-        progressBar.setAttribute('aria-valuenow', percentage);
-        
-        // 更新进度文本
-        document.getElementById('progressText').textContent = `${completed}/${total} 已完成`;
-        
-        // 更新当前状态
-        if (currentTable) {
-            document.getElementById('currentStatusText').textContent = `正在处理: ${currentTable}`;
-        } else if (completed === total && total > 0) {
-            document.getElementById('currentStatusText').textContent = '生成完成！';
-        }
-    }
-
-    // 增量更新相关方法
-    toggleIncrementalMode(enabled) {
-        this.incrementalMode = enabled;
-        const incrementalSection = document.getElementById('incrementalSection');
-        const existingDocSection = document.getElementById('existingDocSection');
-        const selectNewOnlyBtn = document.getElementById('selectNewOnlyBtn');
-        const outputSection = document.getElementById('outputSection');
-        
-        if (enabled) {
-            incrementalSection.style.display = 'block';
-            existingDocSection.style.display = 'block';
-            selectNewOnlyBtn.style.display = 'inline-block';
-            // 增量更新模式下也显示文档保存设置，用于指定保存路径
-            if (outputSection) {
-                outputSection.style.display = 'block';
-            }
-        } else {
-            incrementalSection.style.display = 'none';
-            existingDocSection.style.display = 'none';
-            selectNewOnlyBtn.style.display = 'none';
-            // 普通模式下显示文档保存设置
-            if (outputSection) {
-                outputSection.style.display = 'block';
-            }
-            this.existingDocPath = '';
-            this.existingTables = [];
-            this.newTables = [];
-            document.getElementById('existingDocPath').value = '';
-            document.getElementById('existingTablesInfo').innerHTML = '';
-        }
-    }
-
-    async selectExistingDoc() {
-        try {
-            const input = document.createElement('input');
-            input.type = 'file';
-            input.accept = '.md';
-            
-            input.onchange = async (e) => {
-                const file = e.target.files[0];
-                if (file) {
-                    this.existingDocPath = file.name;
-                    document.getElementById('existingDocPath').value = this.existingDocPath;
-                    
-                    // 直接读取文件内容并解析
-                    await this.parseExistingDocFromFile(file);
-                }
-            };
-            
-            input.click();
-        } catch (error) {
-            console.error('选择文档失败:', error);
-            this.showMessage('选择文档失败: ' + error.message, 'error');
-        }
-    }
-
-    async parseExistingDocFromFile(file) {
-        try {
-            console.log('开始解析文档文件:', file.name);
-            this.showLoading();
-            
-            // 使用FileReader直接读取文件内容
-            const content = await this.readFileContent(file);
-            console.log('文档内容长度:', content ? content.length : 0);
-            console.log('文档内容前500字符:', content ? content.substring(0, 500) : '无内容');
-            
-            // 保存现有文档内容
-            this.existingDocContent = content || '';
-            
-            // 从文档内容中解析表格名称
-            this.existingTables = this.extractTableNamesFromContent(content);
-            console.log('提取到的表格名称:', this.existingTables);
-            
-            this.updateExistingTablesInfo();
-            this.updateNewTablesInfo();
-            
-            if (this.existingTables.length > 0) {
-                this.showMessage(`成功解析文档，发现 ${this.existingTables.length} 个表格`, 'success');
-            } else {
-                this.showMessage('文档解析成功，但未找到表格信息。请检查文档格式是否正确。', 'warning');
-                console.warn('未找到表格，文档内容:', content);
-            }
-        } catch (error) {
-            console.error('解析文档失败:', error);
-            this.showMessage('解析文档失败: ' + error.message, 'error');
-        } finally {
-            this.hideLoading();
-        }
-    }
-
-    async parseExistingDoc(docPath) {
-        try {
-            console.log('开始解析文档:', docPath);
-            this.showLoading();
-            
-            const response = await fetch('/api/parse_doc', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({ doc_path: docPath })
-            });
-
-            console.log('API响应状态:', response.status, response.statusText);
-
-            if (!response.ok) {
-                throw new Error(`HTTP error! status: ${response.status}`);
-            }
-
-            const result = await response.json();
-            console.log('API响应结果:', result);
-            
-            if (result.success) {
-                console.log('文档内容长度:', result.content ? result.content.length : 0);
-                console.log('文档内容前500字符:', result.content ? result.content.substring(0, 500) : '无内容');
-                
-                // 从文档内容中解析表格名称
-                this.existingTables = this.extractTableNamesFromContent(result.content);
-                console.log('提取到的表格名称:', this.existingTables);
-                
-                this.updateExistingTablesInfo();
-                this.updateNewTablesInfo();
-                
-                if (this.existingTables.length > 0) {
-                    this.showMessage(`成功解析文档，发现 ${this.existingTables.length} 个表格`, 'success');
-                } else {
-                    this.showMessage('文档解析成功，但未找到表格信息。请检查文档格式是否正确。', 'warning');
-                    console.warn('未找到表格，文档内容:', result.content);
-                }
-            } else {
-                console.error('解析失败:', result.message || result.error);
-                throw new Error(result.message || result.error || '解析文档失败');
-            }
-        } catch (error) {
-            console.error('解析文档失败:', error);
-            this.showMessage('解析文档失败: ' + error.message, 'error');
-        } finally {
-            this.hideLoading();
-        }
-    }
-
-    // 从markdown内容中提取表格名称
-    extractTableNamesFromContent(content) {
-        const tableNames = [];
-        console.log('开始提取表格名称，内容长度:', content ? content.length : 0);
-        
-        if (!content) {
-            console.warn('文档内容为空');
-            return tableNames;
-        }
-        
-        // 支持多种表格标题格式
-        const patterns = [
-            /^表:\s*(.+)$/gm,           // 表: table_name
-            /^##\s*表:\s*(.+)$/gm,     // ## 表: table_name
-            /^###\s*表:\s*(.+)$/gm,    // ### 表: table_name
-            /^#\s*表:\s*(.+)$/gm,      // # 表: table_name
-            /^表\s+(.+)$/gm,           // 表 table_name
-            /^##\s*(.+)\s*表$/gm,      // ## table_name 表
-            /^###\s*(.+)\s*表$/gm      // ### table_name 表
-        ];
-        
-        patterns.forEach((regex, index) => {
-            console.log(`尝试模式 ${index + 1}:`, regex);
-            let match;
-            regex.lastIndex = 0; // 重置正则表达式状态
-            
-            while ((match = regex.exec(content)) !== null) {
-                const tableName = match[1].trim();
-                console.log(`模式 ${index + 1} 匹配到:`, tableName);
-                
-                if (tableName && !tableNames.includes(tableName)) {
-                    tableNames.push(tableName);
-                }
-            }
-        });
-        
-        console.log('最终提取到的表格名称:', tableNames);
-        
-        // 如果没有找到表格，输出调试信息
-        if (tableNames.length === 0) {
-            console.log('未找到表格，文档前1000字符:');
-            console.log(content.substring(0, 1000));
-            
-            // 查找所有可能的表格相关行
-            const lines = content.split('\n');
-            const possibleTableLines = lines.filter(line => 
-                line.includes('表') || line.includes('Table') || line.includes('table')
-            );
-            console.log('包含"表"字的行:', possibleTableLines);
-        }
-        
-        return tableNames;
-    }
-
-    updateExistingTablesInfo() {
-        const infoDiv = document.getElementById('existingTablesInfo');
-        if (this.existingTables.length > 0) {
-            infoDiv.innerHTML = `
-                <div class="alert alert-info">
-                    <strong>已存在的表格 (${this.existingTables.length}个):</strong><br>
-                    ${this.existingTables.join(', ')}
-                </div>
-            `;
-        } else {
-            infoDiv.innerHTML = '<div class="alert alert-warning">未找到已存在的表格</div>';
-        }
-    }
-
-    updateNewTablesInfo() {
-        // 获取当前选中的所有表格
-        const allSelectedTables = Array.from(this.selectedTables);
-        
-        // 计算新表格（不在已存在表格中的）
-        this.newTables = allSelectedTables.filter(table => !this.existingTables.includes(table));
-        
-        const infoDiv = document.getElementById('existingTablesInfo');
-        const currentInfo = infoDiv.innerHTML;
-        
-        if (this.newTables.length > 0) {
-            infoDiv.innerHTML = currentInfo + `
-                <div class="alert alert-success">
-                    <strong>将要生成的新表格 (${this.newTables.length}个):</strong><br>
-                    ${this.newTables.join(', ')}
-                </div>
-            `;
-        } else if (allSelectedTables.length > 0) {
-            infoDiv.innerHTML = currentInfo + `
-                <div class="alert alert-warning">
-                    所有选中的表格都已存在于文档中，无需生成新内容
-                </div>
-            `;
-        }
-    }
-
-    selectNewTablesOnly() {
-        // 清空当前选择
-        this.selectedTables.clear();
-        
-        // 获取所有表格复选框
-        const checkboxes = document.querySelectorAll('#tablesContainer input[type="checkbox"]');
-        
-        checkboxes.forEach(checkbox => {
-            const tableName = checkbox.value;
-            // 只选择不在已存在表格中的表格
-            if (!this.existingTables.includes(tableName)) {
-                checkbox.checked = true;
-                this.selectedTables.add(tableName);
-            } else {
-                checkbox.checked = false;
-            }
-        });
-        
-        this.updateGenerateButton();
-        this.updateNewTablesInfo();
-    }
-
-    // 切换表格区域的折叠状态
-    toggleTablesCollapse() {
-        const tablesContent = document.getElementById('tablesContent');
-        const toggleIcon = document.getElementById('toggleTablesIcon');
-        const toggleText = document.getElementById('toggleTablesText');
-        const countBadge = document.querySelector('.tables-count-badge');
-        
-        if (tablesContent.classList.contains('collapsed')) {
-            // 展开
-            tablesContent.classList.remove('collapsed');
-            toggleIcon.className = 'fas fa-chevron-up';
-            toggleText.textContent = '折叠';
-            if (countBadge) {
-                countBadge.style.display = 'none';
-            }
-        } else {
-            // 折叠
-            tablesContent.classList.add('collapsed');
-            toggleIcon.className = 'fas fa-chevron-down';
-            toggleText.textContent = '展开';
-            
-            // 显示表格数量徽章
-            if (countBadge) {
-                const totalTables = document.querySelectorAll('#tablesContainer input[type="checkbox"]').length;
-                const selectedTables = document.querySelectorAll('#tablesContainer input[type="checkbox"]:checked').length;
-                countBadge.textContent = `${selectedTables}/${totalTables}`;
-                countBadge.style.display = 'inline-block';
-            }
-        }
-    }
-
-    // 清空连接表单
-    clearConnectionForm() {
-        document.getElementById('connectionHistory').value = '';
-        document.getElementById('dbType').value = 'mysql';
-        document.getElementById('host').value = '';
-        document.getElementById('port').value = '3306';
-        document.getElementById('user').value = '';
-        document.getElementById('password').value = '';
-        document.getElementById('database').value = '';
-        
-        // 禁用删除按钮
-        document.getElementById('deleteConnectionBtn').disabled = true;
-        
-        this.showMessage('表单已清空', 'info');
-    }
-
-    // 设置默认输出路径
-    async setDefaultOutputPath() {
-        if (!this.outputPath) {
-            try {
-                const resp = await fetch('/api/default_path');
-                if (resp.ok) {
-                    const result = await resp.json();
-                    if (result.success && result.path) {
-                        this.outputPath = result.path;
-                    } else {
-                        this.outputPath = this.getDefaultDownloadsPath();
-                    }
-                } else {
-                    this.outputPath = this.getDefaultDownloadsPath();
-                }
-            } catch (e) {
-                this.outputPath = this.getDefaultDownloadsPath();
-            }
-            document.getElementById('outputPath').value = this.outputPath;
-            this.updateGenerateButton();
-        }
-    }
-
-    // 获取默认Downloads路径
-    getDefaultDownloadsPath() {
-        // 后端不可用时的兜底：使用项目下的 output 目录
-        return './output';
-    }
-
-    // 显示改进的路径选择对话框
-    showImprovedPathSelectionDialog() {
-        const modal = document.createElement('div');
-        modal.className = 'modal';
-        modal.style.display = 'block';
-        
-        const defaultPath = this.getDefaultDownloadsPath();
-        
-        modal.innerHTML = `
-            <div class="modal-content">
-                <span class="close" onclick="this.parentElement.parentElement.remove()">&times;</span>
-                <h3>选择文档保存路径</h3>
-                <div style="margin: 20px 0;">
-                    <p><strong>默认路径：</strong> ${defaultPath}</p>
-                    <button id="useDefaultPath" class="btn btn-primary" style="margin: 10px 5px;">使用默认路径</button>
-                    <button id="selectCustomPath" class="btn btn-secondary" style="margin: 10px 5px;">选择自定义路径</button>
-                </div>
-                <div id="customPathSection" style="display: none; margin-top: 20px;">
-                    <label for="customPathInput">自定义路径：</label>
-                    <input type="text" id="customPathInput" placeholder="请输入完整路径，如：C:\\Users\\YourName\\Documents" style="width: 100%; margin: 10px 0; padding: 8px;">
-                    <div style="margin-top: 10px;">
-                        <button id="confirmCustomPath" class="btn btn-primary">确认</button>
-                        <button id="cancelCustomPath" class="btn btn-secondary">取消</button>
-                    </div>
-                </div>
-            </div>
-        `;
-        
-        document.body.appendChild(modal);
-        
-        // 绑定事件
-        document.getElementById('useDefaultPath').onclick = () => {
-            this.outputPath = defaultPath;
-            document.getElementById('outputPath').value = this.outputPath;
-            this.updateGenerateButton();
-            this.showMessage(`已设置保存路径为：${this.outputPath}`, 'success');
-            modal.remove();
-        };
-        
-        document.getElementById('selectCustomPath').onclick = () => {
-            document.getElementById('customPathSection').style.display = 'block';
-            document.getElementById('customPathInput').focus();
-        };
-        
-        document.getElementById('confirmCustomPath').onclick = () => {
-            const customPath = document.getElementById('customPathInput').value.trim();
-            if (customPath) {
-                this.outputPath = customPath;
-                document.getElementById('outputPath').value = this.outputPath;
-                this.updateGenerateButton();
-                this.showMessage(`已设置保存路径为：${this.outputPath}`, 'success');
-                modal.remove();
-            } else {
-                this.showMessage('请输入有效的路径', 'error');
-            }
-        };
-        
-        document.getElementById('cancelCustomPath').onclick = () => {
-            document.getElementById('customPathSection').style.display = 'none';
-        };
-        
-        // 点击模态框外部关闭
-        modal.onclick = (e) => {
-            if (e.target === modal) {
-                modal.remove();
-            }
-        };
-        
-        // ESC键关闭
-        document.addEventListener('keydown', function escHandler(e) {
-            if (e.key === 'Escape') {
-                modal.remove();
-                document.removeEventListener('keydown', escHandler);
-            }
-        });
-    }
-
-    // ==================== 数据库管理器功能 ====================
-    
+    // 初始化数据库管理器
     initDatabaseManager() {
-        // 初始化数据库管理器相关属性
-        this.dbManagerData = {
-            currentDocument: null,
-            parsedTables: [],
-            searchResults: [],
-            currentFilter: {
-                tables: true,
-                fields: true,
-                comments: true
-            }
-        };
-        
-        this.bindDatabaseManagerEvents();
-        
-        // 添加延迟重试机制，确保在标签页内容完全加载后也能绑定事件
-        setTimeout(() => {
-            this.bindDatabaseManagerEvents();
-        }, 100);
-    }
-    
-    bindDatabaseManagerEvents() {
-        // 防止重复绑定事件
-        if (this.dbManagerEventsbound) {
-            return;
-        }
-        
-        // 文件加载事件
-        const fileInput = document.getElementById('dbManagerFileInput');
-        const loadDocBtn = document.getElementById('loadDocBtn');
-        
-        if (fileInput) {
-            fileInput.addEventListener('change', (e) => {
-                if (e.target.files.length > 0) {
-                    this.loadDatabaseDocument(e.target.files[0]);
-                }
-            });
-        }
-        
-        if (loadDocBtn) {
-            loadDocBtn.addEventListener('click', () => {
-                fileInput?.click();
-            });
-        }
-        
-        // 搜索事件
-        const searchInput = document.getElementById('globalSearchInput');
-        const clearSearchBtn = document.getElementById('clearSearchBtn');
-        
-        if (searchInput) {
-            searchInput.addEventListener('input', (e) => {
-                this.performSearch(e.target.value);
-            });
-        }
-        
-        if (clearSearchBtn) {
-            clearSearchBtn.addEventListener('click', () => {
-                searchInput.value = '';
-                this.performSearch('');
-            });
-        }
-        
-        // 过滤器事件
-        const filterCheckboxes = ['filterTables', 'filterFields', 'filterComments'];
-        filterCheckboxes.forEach(id => {
-            const checkbox = document.getElementById(id);
-            if (checkbox) {
-                checkbox.addEventListener('change', () => {
-                    this.updateSearchFilters();
-                });
-            }
-        });
-        
-        // 拖放支持
-        const searchResultsList = document.getElementById('searchResultsList');
-        if (searchResultsList) {
-            searchResultsList.addEventListener('dragover', (e) => {
-                e.preventDefault();
-                searchResultsList.classList.add('drag-over');
-            });
-            
-            searchResultsList.addEventListener('dragleave', (e) => {
-                e.preventDefault();
-                searchResultsList.classList.remove('drag-over');
-            });
-            
-            searchResultsList.addEventListener('drop', (e) => {
-                e.preventDefault();
-                searchResultsList.classList.remove('drag-over');
-                
-                const files = e.dataTransfer.files;
-                if (files.length > 0 && files[0].name.endsWith('.md')) {
-                    this.loadDatabaseDocument(files[0]);
-                }
-            });
-        }
-
-        // 全屏按钮事件
-        const dbManagerFullscreenBtn = document.getElementById('dbManagerFullscreenBtn');
-        if (dbManagerFullscreenBtn && !dbManagerFullscreenBtn.hasAttribute('data-event-bound')) {
-            dbManagerFullscreenBtn.addEventListener('click', () => {
-                this.toggleDatabaseManagerFullscreen();
-            });
-            dbManagerFullscreenBtn.setAttribute('data-event-bound', 'true');
-        }
-        
-        // 标记事件已绑定
-        this.dbManagerEventsbound = true;
+        // 实现数据库管理器初始化
     }
 
-    toggleDatabaseManagerFullscreen() {
-        const dbManager = document.getElementById('db-manager');
-        const dbManagerFullscreenBtn = document.getElementById('dbManagerFullscreenBtn');
-        const fullscreenIcon = dbManagerFullscreenBtn ? dbManagerFullscreenBtn.querySelector('i') : null;
-        
-        if (!dbManager || !dbManagerFullscreenBtn) {
-            return;
-        }
-        
-        if (dbManager.classList.contains('db-manager-fullscreen')) {
-            // 退出全屏
-            dbManager.classList.remove('db-manager-fullscreen');
-            if (fullscreenIcon) fullscreenIcon.className = 'fas fa-expand';
-            dbManagerFullscreenBtn.title = '全屏显示';
-            document.body.style.overflow = '';
-        } else {
-            // 进入全屏
-            dbManager.classList.add('db-manager-fullscreen');
-            if (fullscreenIcon) fullscreenIcon.className = 'fas fa-compress';
-            dbManagerFullscreenBtn.title = '退出全屏';
-            document.body.style.overflow = 'hidden';
-        }
-    }
-    
-    async loadDatabaseDocument(file) {
-        try {
-            const content = await this.readFileContent(file);
-            this.dbManagerData.currentDocument = {
-                name: file.name,
-                content: content,
-                size: file.size,
-                lastModified: file.lastModified
-            };
-            
-            // 解析文档
-            this.parseDatabaseDocument(content);
-            
-            // 更新UI
-            this.updateDatabaseManagerUI();
-            
-            this.showMessage(`成功加载文档: ${file.name}`, 'success');
-        } catch (error) {
-            console.error('加载文档失败:', error);
-            this.showMessage('加载文档失败，请检查文件格式', 'danger');
-        }
-    }
-    
-    readFileContent(file) {
-        return new Promise((resolve, reject) => {
-            const reader = new FileReader();
-            reader.onload = (e) => resolve(e.target.result);
-            reader.onerror = (e) => reject(e);
-            reader.readAsText(file, 'utf-8');
-        });
-    }
-    
-    parseDatabaseDocument(content) {
-        const tables = [];
-        const lines = content.split('\n');
-        let currentTable = null;
-        
-        for (let i = 0; i < lines.length; i++) {
-            const line = lines[i].trim();
-            
-            // 检测表名（支持多种格式：## 表名、表: 表名、# 表名）
-            if (line.startsWith('表: ') || 
-                (line.startsWith('## ') && !line.includes('数据库文档')) ||
-                (line.startsWith('# ') && !line.includes('数据库文档'))) {
-                
-                if (currentTable) {
-                    tables.push(currentTable);
-                }
-                
-                let tableName = '';
-                if (line.startsWith('表: ')) {
-                    tableName = line.replace('表: ', '').trim();
-                } else if (line.startsWith('## ')) {
-                    tableName = line.replace('## ', '').trim();
-                } else if (line.startsWith('# ')) {
-                    tableName = line.replace('# ', '').trim();
-                }
-                
-                currentTable = {
-                    name: tableName,
-                    fields: [],
-                    lineNumber: i + 1,
-                    description: ''
-                };
-                continue;
-            }
-            
-            // 检测表格行（参考文档查看器的解析逻辑）
-            if (currentTable && line.includes('|')) {
-                // 跳过分隔符行（如 |---|---|---|）
-                if (line.match(/^\|[\s\-\|:]+\|$/)) {
-                    continue;
-                }
-                
-                // 解析表格行
-                const cells = line.split('|').map(cell => cell.trim());
-                
-                // 移除首尾的空元素（由于行首行尾的|导致的）
-                if (cells.length > 0 && cells[0] === '') cells.shift();
-                if (cells.length > 0 && cells[cells.length - 1] === '') cells.pop();
-                
-                if (cells.length === 0) continue;
-                
-                // 检查是否是表头行（包含"字段"、"类型"等关键词）
-                const isHeaderRow = cells.some(cell => 
-                    cell.includes('字段名') || 
-                    cell.includes('字段') || 
-                    cell.includes('类型') || 
-                    cell.includes('数据类型') ||
-                    cell.includes('是否可空') ||
-                    cell.includes('默认值') ||
-                    cell.includes('中文含义') ||
-                    cell.includes('中文说明') ||
-                    cell.includes('注释') ||
-                    cell.includes('Field') ||
-                    cell.includes('Type')
-                );
-                
-                // 跳过表头行
-                if (isHeaderRow) {
-                    continue;
-                }
-                
-                // 解析字段数据行
-                if (cells.length >= 2) {
-                    const field = {
-                        name: cells[0] || '',
-                        lineNumber: i + 1,
-                        index: currentTable.fields.length
-                    };
-                    
-                    // 根据列数判断格式
-                    if (cells.length >= 6) {
-                        // 6列格式：字段名 | 类型 | 是否可空 | 默认值 | 中文含义 | 注释
-                        field.type = cells[1] || '';
-                        field.nullable = cells[2] || '';
-                        field.defaultValue = cells[3] || '';
-                        field.description = cells[4] || '';  // 中文含义
-                        field.comment = cells[5] || '';      // 注释
-                    } else if (cells.length >= 3) {
-                        // 3列格式：字段名称 | 数据类型 | 中文说明
-                        field.type = cells[1] || '';
-                        field.description = cells[2] || '';  // 中文说明
-                        field.nullable = '';
-                        field.defaultValue = '';
-                        field.comment = '';
-                    } else {
-                        // 最少2列：字段名 | 类型
-                        field.type = cells[1] || '';
-                        field.description = '';
-                        field.nullable = '';
-                        field.defaultValue = '';
-                        field.comment = '';
-                    }
-                    
-                    currentTable.fields.push(field);
-                }
-            }
-        }
-        
-        // 添加最后一个表
-        if (currentTable) {
-            tables.push(currentTable);
-        }
-        
-        this.dbManagerData.parsedTables = tables;
-        console.log('解析到的表:', tables);
-    }
-    
-    updateDatabaseManagerUI() {
-        // 更新统计信息
-        const stats = document.getElementById('searchStats');
-        if (stats) {
-            const tableCount = this.dbManagerData.parsedTables.length;
-            const fieldCount = this.dbManagerData.parsedTables.reduce((sum, table) => sum + table.fields.length, 0);
-            stats.textContent = `共 ${tableCount} 个表，${fieldCount} 个字段`;
-        }
-        
-        // 初次加载时只显示表，字段默认折叠
-        const allResults = [];
-        this.dbManagerData.parsedTables.forEach(table => {
-            // 添加表本身
-            allResults.push({
-                type: 'table',
-                table: table,
-                matchText: table.name,
-                description: `表 - ${table.fields.length} 个字段`,
-                collapsed: true // 标记表的字段是否折叠
-            });
-            
-            // 字段在初次加载时不显示，只在搜索时显示
-        });
-        
-        this.displaySearchResults(allResults);
-    }
-    
-    performSearch(query) {
-        if (!query.trim()) {
-            this.updateDatabaseManagerUI();
-            return;
-        }
-        
-        const results = [];
-        const searchTerm = query.toLowerCase();
-        const tablesWithMatchedFields = new Set(); // 记录有匹配字段的表
-        
-        this.dbManagerData.parsedTables.forEach(table => {
-            let tableAdded = false;
-            
-            // 搜索表名
-            if (this.dbManagerData.currentFilter.tables && table.name.toLowerCase().includes(searchTerm)) {
-                results.push({
-                    type: 'table',
-                    table: table,
-                    matchText: table.name,
-                    description: `表: ${table.name} (${table.fields.length} 个字段)`,
-                    collapsed: false // 搜索时展开显示字段
-                });
-                tableAdded = true;
-            }
-            
-            // 搜索字段
-            if (this.dbManagerData.currentFilter.fields || this.dbManagerData.currentFilter.comments) {
-                const matchedFields = [];
-                
-                table.fields.forEach(field => {
-                    let matched = false;
-                    let matchText = '';
-                    
-                    if (this.dbManagerData.currentFilter.fields && field.name.toLowerCase().includes(searchTerm)) {
-                        matched = true;
-                        matchText = field.name;
-                    }
-                    
-                    if (this.dbManagerData.currentFilter.comments && field.description.toLowerCase().includes(searchTerm)) {
-                        matched = true;
-                        matchText = matchText || field.description;
-                    }
-                    
-                    if (matched) {
-                        matchedFields.push({
-                            type: 'field',
-                            table: table,
-                            field: field,
-                            matchText: matchText,
-                            description: `${table.name}.${field.name} - ${field.description}`
-                        });
-                        tablesWithMatchedFields.add(table.name);
-                    }
-                });
-                
-                // 如果有匹配的字段但表还没有添加，先添加表
-                if (matchedFields.length > 0 && !tableAdded) {
-                    results.push({
-                        type: 'table',
-                        table: table,
-                        matchText: table.name,
-                        description: `表: ${table.name} (${matchedFields.length} 个匹配字段)`,
-                        collapsed: false // 搜索时展开显示字段
-                    });
-                }
-                
-                // 添加匹配的字段
-                results.push(...matchedFields);
-            }
-        });
-        
-        this.dbManagerData.searchResults = results;
-        this.displaySearchResults(results);
-    }
-    
-    displaySearchResults(results) {
-        const container = document.getElementById('searchResultsList');
-        if (!container) return;
-        
-        if (results.length === 0) {
-            container.innerHTML = `
-                <div class="text-center text-muted p-4">
-                    <i class="fas fa-search fa-2x mb-3 opacity-50"></i>
-                    <p class="mb-0">没有找到匹配的结果</p>
-                </div>
-            `;
-            return;
-        }
-        
-        const html = results.map((result, index) => {
-            const isTable = result.type === 'table';
-            const icon = isTable ? 'fas fa-table' : 'fas fa-columns';
-            const badgeClass = isTable ? 'bg-primary' : 'bg-secondary';
-            const badgeText = isTable ? '表' : '字段';
-            
-            // 为字段项使用更小的样式
-            if (!isTable) {
-                return `
-                    <div class="list-group-item list-group-item-action py-2" data-result-index="${index}" style="border-left: 3px solid #6c757d; margin-left: 10px;">
-                        <div class="d-flex w-100 justify-content-between align-items-center">
-                            <div class="flex-grow-1">
-                                <div class="d-flex align-items-center">
-                                    <i class="${icon} me-2 text-muted" style="font-size: 0.8rem;"></i>
-                                    <small class="mb-0 fw-medium">${this.highlightText(result.matchText, this.getCurrentSearchTerm())}</small>
-                                    <span class="badge ${badgeClass} ms-2" style="font-size: 0.65rem;">${badgeText}</span>
-                                </div>
-                                <div class="text-muted" style="font-size: 0.7rem; margin-left: 1.2rem;">${result.field.type} - ${result.field.description || '无描述'}</div>
-                            </div>
-                            <small class="text-muted">
-                                <i class="fas fa-arrow-right" style="font-size: 0.7rem;"></i>
-                            </small>
-                        </div>
-                    </div>
-                `;
-            } else {
-                // 表格项添加展开/折叠功能
-                const isCollapsed = result.collapsed !== false; // 默认折叠，但搜索时可能展开
-                const toggleIcon = isCollapsed ? 'fas fa-chevron-right' : 'fas fa-chevron-down';
-                
-                return `
-                    <div class="list-group-item list-group-item-action" data-result-index="${index}" data-table-name="${result.table.name}">
-                        <div class="d-flex w-100 justify-content-between align-items-start">
-                            <div class="flex-grow-1">
-                                <div class="d-flex align-items-center mb-1">
-                                    <i class="${toggleIcon} me-2 table-toggle-icon" style="cursor: pointer; color: #6c757d;" data-table-name="${result.table.name}"></i>
-                                    <i class="${icon} me-2"></i>
-                                    <h6 class="mb-0">${this.highlightText(result.matchText, this.getCurrentSearchTerm())}</h6>
-                                    <span class="badge ${badgeClass} ms-2">${badgeText}</span>
-                                </div>
-                                <p class="mb-1 text-muted small">${result.description}</p>
-                            </div>
-                            <small class="text-muted">
-                                <i class="fas fa-arrow-right"></i>
-                            </small>
-                        </div>
-                    </div>
-                `;
-            }
-        }).join('');
-        
-        container.innerHTML = html;
-        
-        // 绑定点击事件
-        container.querySelectorAll('.list-group-item').forEach((item, index) => {
-            item.addEventListener('click', (e) => {
-                // 如果点击的是展开/折叠图标，处理展开/折叠逻辑
-                if (e.target.classList.contains('table-toggle-icon')) {
-                    e.stopPropagation();
-                    this.toggleTableFields(e.target.dataset.tableName);
-                    return;
-                }
-                
-                // 否则显示详情
-                this.showResultDetail(results[index]);
-            });
-        });
-    }
-    
-    getCurrentSearchTerm() {
-        const searchInput = document.getElementById('globalSearchInput');
-        return searchInput ? searchInput.value : '';
-    }
-    
-    toggleTableFields(tableName) {
-        // 找到对应的表
-        const table = this.dbManagerData.parsedTables.find(t => t.name === tableName);
-        if (!table) return;
-        
-        // 获取当前搜索词
-        const searchTerm = this.getCurrentSearchTerm();
-        
-        // 找到表项的DOM元素
-        const tableItem = document.querySelector(`[data-table-name="${tableName}"]`);
-        if (!tableItem) return;
-        
-        // 获取展开/折叠图标
-        const toggleIcon = tableItem.querySelector('.table-toggle-icon');
-        if (!toggleIcon) return;
-        
-        // 检查当前状态
-        const isCurrentlyCollapsed = toggleIcon.classList.contains('fa-chevron-right');
-        
-        if (isCurrentlyCollapsed) {
-            // 展开：显示字段
-            toggleIcon.classList.remove('fa-chevron-right');
-            toggleIcon.classList.add('fa-chevron-down');
-            
-            // 在表项后面插入字段项
-            const fieldResults = table.fields.map(field => ({
-                type: 'field',
-                table: table,
-                field: field,
-                matchText: field.name,
-                description: `${table.name}.${field.name} - ${field.description}`
-            }));
-            
-            // 生成字段HTML
-            const fieldsHtml = fieldResults.map((result, index) => {
-                const icon = 'fas fa-columns';
-                const badgeClass = 'bg-secondary';
-                const badgeText = '字段';
-                
-                return `
-                    <div class="list-group-item list-group-item-action py-2 table-field-item" data-table-name="${tableName}" style="border-left: 3px solid #6c757d; margin-left: 10px;">
-                        <div class="d-flex w-100 justify-content-between align-items-center">
-                            <div class="flex-grow-1">
-                                <div class="d-flex align-items-center">
-                                    <i class="${icon} me-2 text-muted" style="font-size: 0.8rem;"></i>
-                                    <small class="mb-0 fw-medium">${this.highlightText(result.matchText, searchTerm)}</small>
-                                    <span class="badge ${badgeClass} ms-2" style="font-size: 0.65rem;">${badgeText}</span>
-                                </div>
-                                <div class="text-muted" style="font-size: 0.7rem; margin-left: 1.2rem;">${result.field.type} - ${result.field.description || '无描述'}</div>
-                            </div>
-                            <small class="text-muted">
-                                <i class="fas fa-arrow-right" style="font-size: 0.7rem;"></i>
-                            </small>
-                        </div>
-                    </div>
-                `;
-            }).join('');
-            
-            // 插入字段HTML
-            tableItem.insertAdjacentHTML('afterend', fieldsHtml);
-            
-            // 为新插入的字段项绑定点击事件
-            const newFieldItems = document.querySelectorAll(`[data-table-name="${tableName}"].table-field-item`);
-            newFieldItems.forEach((item, index) => {
-                item.addEventListener('click', () => {
-                    this.showResultDetail(fieldResults[index]);
-                });
-            });
-            
-        } else {
-            // 折叠：隐藏字段
-            toggleIcon.classList.remove('fa-chevron-down');
-            toggleIcon.classList.add('fa-chevron-right');
-            
-            // 移除所有该表的字段项
-            const fieldItems = document.querySelectorAll(`[data-table-name="${tableName}"].table-field-item`);
-            fieldItems.forEach(item => item.remove());
-        }
-    }
-    
-    highlightText(text, searchTerm) {
-        if (!searchTerm) return text;
-        
-        const regex = new RegExp(`(${searchTerm})`, 'gi');
-        return text.replace(regex, '<mark>$1</mark>');
-    }
-    
-    showResultDetail(result) {
-        const titleElement = document.getElementById('detailPanelTitle');
-        const contentElement = document.getElementById('detailPanelContent');
-        
-        if (!titleElement || !contentElement) return;
-        
-        // 无论是表还是字段，都显示表详情
-        this.showTableDetail(result.table, titleElement, contentElement);
-        
-        // 确保右侧详情面板滚动到顶部，让用户能看到详情内容
-        const detailPanel = contentElement.closest('.overflow-auto');
-        if (detailPanel) {
-            detailPanel.scrollTop = 0;
-        }
-    }
-    
-    showTableDetail(table, titleElement, contentElement) {
-        titleElement.innerHTML = `
-            <i class="fas fa-table"></i> 
-            表详情: ${table.name}
-        `;
-        
-        const fieldsHtml = table.fields.map((field, index) => {
-            // 处理是否可空的显示
-            let nullableDisplay = '-';
-            if (field.nullable) {
-                if (field.nullable.toUpperCase() === 'NO') {
-                    nullableDisplay = '<span class="badge bg-danger">NO</span>';
-                } else if (field.nullable.toUpperCase() === 'YES') {
-                    nullableDisplay = '<span class="badge bg-success">YES</span>';
-                } else {
-                    nullableDisplay = field.nullable;
-                }
-            }
-            
-            // 处理默认值的显示
-            const defaultValueDisplay = field.defaultValue ? `<code>${field.defaultValue}</code>` : '-';
-            
-            // 处理中文含义显示 - 优先显示description，如果没有则显示comment作为fallback
-            let descriptionDisplay = field.description || '';
-            if (!descriptionDisplay && field.comment) {
-                descriptionDisplay = field.comment;
-            }
-            descriptionDisplay = descriptionDisplay || '无说明';
-            
-            // 处理注释显示 - 如果description存在，则comment作为额外注释；否则显示为空
-            let commentDisplay = '-';
-            if (field.description && field.comment && field.comment !== field.description) {
-                commentDisplay = field.comment;
-            } else if (!field.description && !field.comment) {
-                commentDisplay = '-';
-            }
-            
-            return `
-                <tr>
-                    <td class="text-center">${index + 1}</td>
-                    <td><code>${field.name}</code></td>
-                    <td><span class="badge bg-info">${field.type}</span></td>
-                    <td class="text-center">${nullableDisplay}</td>
-                    <td class="text-center">${defaultValueDisplay}</td>
-                    <td>${descriptionDisplay}</td>
-                    <td>${commentDisplay}</td>
-                </tr>
-            `;
-        }).join('');
-        
-        contentElement.innerHTML = `
-            <!-- 基本信息一行展示 -->
-            <div class="alert alert-info mb-3 py-2">
-                <div class="d-flex align-items-center justify-content-between">
-                    <div class="d-flex align-items-center">
-                        <i class="fas fa-table me-2"></i>
-                        <strong>表名:</strong>
-                        <code class="ms-2 me-3">${table.name}</code>
-                        <strong>字段数量:</strong>
-                        <span class="badge bg-primary ms-2 me-3">${table.fields.length}</span>
-                        <strong>文档位置:</strong>
-                        <span class="text-muted ms-2">第 ${table.lineNumber} 行</span>
-                    </div>
-                </div>
-            </div>
-            
-            <!-- 字段信息表格 -->
-            <div class="card">
-                <div class="card-header py-2">
-                    <h6 class="mb-0">
-                        <i class="fas fa-columns"></i> 字段列表
-                    </h6>
-                </div>
-                <div class="card-body p-0">
-                    <div class="table-responsive">
-                        <table class="table table-hover mb-0">
-                            <thead class="table-light">
-                                <tr>
-                                    <th class="text-center" style="width: 50px;">#</th>
-                                    <th style="width: 150px;">字段名</th>
-                                    <th style="width: 120px;">数据类型</th>
-                                    <th class="text-center" style="width: 80px;">是否可空</th>
-                                    <th style="width: 100px;">默认值</th>
-                                    <th style="width: 250px;">中文含义</th>
-                                    <th style="width: 250px;">注释</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                ${fieldsHtml}
-                            </tbody>
-                        </table>
-                    </div>
-                </div>
-            </div>
-        `;
-    }
-    
-
-    
-    updateSearchFilters() {
-        this.dbManagerData.currentFilter = {
-            tables: document.getElementById('filterTables')?.checked || false,
-            fields: document.getElementById('filterFields')?.checked || false,
-            comments: document.getElementById('filterComments')?.checked || false
-        };
-        
-        // 重新执行搜索
-        const searchInput = document.getElementById('globalSearchInput');
-        if (searchInput) {
-            this.performSearch(searchInput.value);
-        }
-    }
-
-    // 通知相关方法
-    async initNotificationPermission() {
+    // 初始化通知权限
+    initNotificationPermission() {
+        // 检查浏览器是否支持通知
         if ('Notification' in window) {
-            this.notificationPermission = Notification.permission;
-            if (this.notificationPermission === 'default') {
-                // 在用户开始生成文档时请求权限，而不是立即请求
-                console.log('浏览器通知权限未设置，将在生成文档时请求权限');
-            }
-        } else {
-            console.log('此浏览器不支持桌面通知');
-        }
-    }
-
-    async requestNotificationPermission() {
-        if ('Notification' in window && this.notificationPermission === 'default') {
-            try {
-                this.notificationPermission = await Notification.requestPermission();
-                return this.notificationPermission === 'granted';
-            } catch (error) {
-                console.error('请求通知权限失败:', error);
-                return false;
-            }
-        }
-        return this.notificationPermission === 'granted';
-    }
-
-    showDesktopNotification(title, message, options = {}) {
-        if (this.notificationPermission === 'granted') {
-            const notification = new Notification(title, {
-                body: message,
-                icon: '/static/favicon.ico', // 使用网站图标
-                badge: '/static/favicon.ico',
-                tag: 'db-doc-generation', // 防止重复通知
-                requireInteraction: true, // 需要用户交互才会消失
-                ...options
+            // 请求通知权限
+            Notification.requestPermission().then(permission => {
+                this.notificationPermission = permission;
             });
-
-            // 点击通知时聚焦到窗口
-            notification.onclick = () => {
-                window.focus();
-                notification.close();
-                this.stopTitleFlash(); // 停止标题闪烁
-            };
-
-            // 5秒后自动关闭
-            setTimeout(() => {
-                notification.close();
-            }, 5000);
-
-            return notification;
         }
-        return null;
     }
 
-    startTitleFlash(message = '文档生成完成！') {
-        if (this.titleFlashInterval) {
-            this.stopTitleFlash();
+    // 发送生成完成通知
+    notifyGenerationComplete(filePath) {
+        // 如果浏览器支持通知且已获得权限，则发送通知
+        if ('Notification' in window && this.notificationPermission === 'granted') {
+            new Notification('文档生成完成', {
+                body: `您的数据库文档已成功生成，文件名：${filePath.split('/').pop()}`,
+                icon: '/static/img/favicon.ico'
+            });
+        } else {
+            // 否则闪烁页面标题
+            this.flashTitle('文档生成完成！');
         }
+    }
 
+    // 闪烁页面标题
+    flashTitle(message) {
+        // 清除之前的定时器
+        if (this.titleFlashInterval) {
+            clearInterval(this.titleFlashInterval);
+        }
+        
         let isOriginal = true;
         this.titleFlashInterval = setInterval(() => {
             document.title = isOriginal ? message : this.originalTitle;
             isOriginal = !isOriginal;
-        }, 1000); // 每秒切换一次
-
-        // 10秒后自动停止闪烁
+        }, 1000);
+        
+        // 5秒后恢复原始标题
         setTimeout(() => {
-            this.stopTitleFlash();
-        }, 10000);
+            this.restoreTitle();
+        }, 5000);
     }
 
-    stopTitleFlash() {
+    // 恢复原始页面标题
+    restoreTitle() {
         if (this.titleFlashInterval) {
             clearInterval(this.titleFlashInterval);
             this.titleFlashInterval = null;
-            document.title = this.originalTitle; // 恢复原始标题
         }
-    }
-
-    playNotificationSound() {
-        try {
-            // 创建一个简单的提示音
-            const audioContext = new (window.AudioContext || window.webkitAudioContext)();
-            const oscillator = audioContext.createOscillator();
-            const gainNode = audioContext.createGain();
-
-            oscillator.connect(gainNode);
-            gainNode.connect(audioContext.destination);
-
-            oscillator.frequency.setValueAtTime(800, audioContext.currentTime);
-            oscillator.frequency.setValueAtTime(600, audioContext.currentTime + 0.1);
-            oscillator.frequency.setValueAtTime(800, audioContext.currentTime + 0.2);
-
-            gainNode.gain.setValueAtTime(0.3, audioContext.currentTime);
-            gainNode.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + 0.3);
-
-            oscillator.start(audioContext.currentTime);
-            oscillator.stop(audioContext.currentTime + 0.3);
-        } catch (error) {
-            console.log('无法播放提示音:', error);
-        }
-    }
-
-    async notifyGenerationComplete(filePath) {
-        const message = `数据库文档生成完成！文件已保存到: ${filePath}`;
-        
-        // 1. 显示Toast通知
-        this.showMessage('🎉 数据库文档生成完成！', 'success');
-        
-        // 2. 请求并显示桌面通知
-        const hasPermission = await this.requestNotificationPermission();
-        if (hasPermission) {
-            this.showDesktopNotification(
-                'DB2Doc - 文档生成完成',
-                message,
-                {
-                    icon: '/static/favicon.ico'
-                }
-            );
-        }
-        
-        // 3. 开始页面标题闪烁
-        this.startTitleFlash('🎉 文档生成完成！');
-        
-        // 4. 播放提示音
-        this.playNotificationSound();
-        
-        // 5. 如果页面不可见，添加页面可见性监听
-        if (document.hidden) {
-            const handleVisibilityChange = () => {
-                if (!document.hidden) {
-                    this.stopTitleFlash();
-                    document.removeEventListener('visibilitychange', handleVisibilityChange);
-                }
-            };
-            document.addEventListener('visibilitychange', handleVisibilityChange);
-        }
+        document.title = this.originalTitle;
     }
 }
 
 // 页面加载完成后初始化应用
+let dbDocGenerator;
 document.addEventListener('DOMContentLoaded', () => {
-    window.app = new DatabaseDocGenerator();
-    window.app.init(); // 调用初始化方法
-    
-    // 添加标签页切换事件监听器
-    const dbManagerTab = document.querySelector('a[href="#db-manager"]');
-    if (dbManagerTab) {
-        dbManagerTab.addEventListener('shown.bs.tab', () => {
-            // 重新绑定全屏按钮事件（仅绑定全屏按钮，避免重复绑定其他事件）
-            const dbManagerFullscreenBtn = document.getElementById('dbManagerFullscreenBtn');
-            if (dbManagerFullscreenBtn && !dbManagerFullscreenBtn.hasAttribute('data-event-bound')) {
-                dbManagerFullscreenBtn.addEventListener('click', () => {
-                    window.app.toggleDatabaseManagerFullscreen();
-                });
-                dbManagerFullscreenBtn.setAttribute('data-event-bound', 'true');
-            }
-        });
-    }
-    
-    // 表单验证
-    const form = document.getElementById('dbConfigForm');
-    const inputs = form.querySelectorAll('input[required]');
-    
-    inputs.forEach(input => {
-        input.addEventListener('blur', () => {
-            if (input.value.trim() === '') {
-                input.classList.add('is-invalid');
-            } else {
-                input.classList.remove('is-invalid');
-            }
-        });
-    });
-    
-    // 页面卸载时清理资源
-    window.addEventListener('beforeunload', () => {
-        window.app.cleanup();
-    });
+    dbDocGenerator = new DatabaseDocGenerator();
 });
 
-// Toast 消息显示函数
+// 页面关闭时清理资源
+window.addEventListener('beforeunload', () => {
+    if (dbDocGenerator) {
+        dbDocGenerator.cleanup();
+    }
+});
+
+// Toast消息函数
 function showToast(message, type = 'info') {
-    console.log('showToast called with:', message, type);
-    const toastContainer = document.querySelector('.toast-container');
-    if (!toastContainer) {
-        console.error('Toast container not found');
-        return;
+    // 统一使用固定容器，避免多条 toast 固定定位导致重叠
+    let container = document.getElementById('toastContainer');
+    if (!container) {
+        container = document.createElement('div');
+        container.id = 'toastContainer';
+        container.className = 'toast-container position-fixed top-0 end-0 p-3';
+        container.style.zIndex = '9999';
+        document.body.appendChild(container);
     }
 
-    // 创建唯一的 toast ID
-    const toastId = 'toast-' + Date.now() + '-' + Math.random().toString(36).substr(2, 9);
-    
-    // 根据类型设置样式
-    const typeClasses = {
-        'success': 'text-bg-success',
-        'error': 'text-bg-danger',
-        'warning': 'text-bg-warning',
-        'info': 'text-bg-info'
-    };
-    
-    const typeIcons = {
-        'success': 'fas fa-check-circle',
-        'error': 'fas fa-exclamation-circle',
-        'warning': 'fas fa-exclamation-triangle',
-        'info': 'fas fa-info-circle'
-    };
-    
-    const bgClass = typeClasses[type] || typeClasses['info'];
-    const iconClass = typeIcons[type] || typeIcons['info'];
-    
-    // 创建 toast HTML
-    const toastHtml = `
-        <div id="${toastId}" class="toast ${bgClass}" role="alert" aria-live="assertive" aria-atomic="true" data-bs-autohide="true" data-bs-delay="5000">
-            <div class="toast-header">
-                <i class="${iconClass} me-2"></i>
-                <strong class="me-auto">系统消息</strong>
-                <small class="text-muted">刚刚</small>
-                <button type="button" class="btn-close" data-bs-dismiss="toast" aria-label="Close"></button>
-            </div>
+    // 创建Toast元素
+    const toast = document.createElement('div');
+    toast.className = `toast align-items-center text-white bg-${type} border-0`;
+    toast.role = "alert";
+    toast.setAttribute("aria-live", "assertive");
+    toast.setAttribute("aria-atomic", "true");
+    toast.innerHTML = `
+        <div class="d-flex">
             <div class="toast-body">
                 ${message}
             </div>
+            <button type="button" class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast" aria-label="Close"></button>
         </div>
     `;
     
-    // 添加到容器
-    toastContainer.insertAdjacentHTML('beforeend', toastHtml);
+    // 添加到容器（自然流式堆叠）
+    container.appendChild(toast);
     
-    // 获取新创建的 toast 元素
-    const toastElement = document.getElementById(toastId);
-    
-    // 初始化并显示 toast
-    const toast = new bootstrap.Toast(toastElement);
-    toast.show();
-    
-    // 监听 toast 隐藏事件，自动移除 DOM 元素
-    toastElement.addEventListener('hidden.bs.toast', () => {
-        toastElement.remove();
+    // 初始化并显示Toast
+    const bsToast = new bootstrap.Toast(toast, { delay: 3000, autohide: true });
+    bsToast.show();
+
+    // Toast 隐藏后移除，避免残留
+    toast.addEventListener('hidden.bs.toast', () => {
+        toast.remove();
     });
 }

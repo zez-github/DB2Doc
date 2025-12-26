@@ -3,6 +3,7 @@ AI助手工具
 """
 
 import json
+import re
 from openai import OpenAI
 from ..config import config
 
@@ -78,12 +79,13 @@ def infer_chinese_meaning(columns, table_name, db_description=""):
 2. 每个字段含义不超过10个字符
 3. 根据字段名和类型推断业务含义
 4. 对于常见字段使用标准含义（如id=标识符，name=名称等）
-5. 如果提供了数据库功能介绍，请结合业务场景进行更精准的推断"""
+5. 如果提供了数据库功能介绍，请结合业务场景进行更精准的推断
+6. 只输出一个JSON对象本身，不要输出任何解释性文字，不要使用```代码块包裹"""
     
     try:
         # 确保prompt是字符串类型
         prompt_str = str(prompt)
-        system_content = "你是一个数据库专家，擅长根据字段名称、类型和业务场景推断字段的业务含义。当提供了数据库功能介绍时，你会结合具体的业务场景进行更精准的推理。"
+        system_content = "你是一个数据库专家，擅长根据字段名称、类型和业务场景推断字段的业务含义。当提供了数据库功能介绍时，你会结合具体的业务场景进行更精准的推理。仅返回推断得Json格式的结果即可，其他内容无需提供。"
         
         print(f"正在调用AI推断表 {table_name_str} 的列含义...")
         
@@ -99,12 +101,40 @@ def infer_chinese_meaning(columns, table_name, db_description=""):
         
         result_text = response.choices[0].message.content.strip()
         
-        # 清理JSON格式（移除可能的markdown代码块标记）
-        clean_content = result_text.removeprefix('```json').removesuffix('```').strip()
+        def _extract_first_json_object(text: str):
+            """
+            从模型返回文本中尽可能稳健地提取第一个JSON对象(dict)。
+            - 优先解析 ```json ... ``` / ``` ... ``` 代码块内容
+            - 其次对全文做 raw_decode，允许后面跟随“解释”等额外文本
+            """
+            if not text:
+                raise json.JSONDecodeError("Empty response", text, 0)
+
+            decoder = json.JSONDecoder()
+
+            # 1) 优先尝试解析 fenced code block（可能有多段，取第一段能解析成功的）
+            fenced_blocks = re.findall(r"```(?:json)?\s*([\s\S]*?)\s*```", text, flags=re.IGNORECASE)
+            for block in fenced_blocks:
+                candidate = block.strip()
+                if not candidate:
+                    continue
+                try:
+                    obj, _ = decoder.raw_decode(candidate.lstrip())
+                    if isinstance(obj, dict):
+                        return obj
+                except json.JSONDecodeError:
+                    continue
+
+            # 2) 再尝试对全文做一次宽松解析：去掉明显的围栏标记后 raw_decode
+            unfenced = re.sub(r"```(?:json)?", "", text, flags=re.IGNORECASE).replace("```", "")
+            obj, _ = decoder.raw_decode(unfenced.lstrip())
+            if not isinstance(obj, dict):
+                raise json.JSONDecodeError("Top-level JSON is not an object", unfenced, 0)
+            return obj
         
         # 解析JSON结果
         try:
-            meanings = json.loads(clean_content)
+            meanings = _extract_first_json_object(result_text)
             # 确保所有值都是字符串类型
             meanings = {str(k): str(v) for k, v in meanings.items()}
         except json.JSONDecodeError as json_error:

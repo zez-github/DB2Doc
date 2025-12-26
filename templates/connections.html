@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>数据库连接管理 - DB2Doc</title>
+    <link href="{{ url_for('static', filename='lib/bootstrap/bootstrap.min.css') }}" rel="stylesheet">
+    <link href="{{ url_for('static', filename='lib/fontawesome/css/all.min.css') }}" rel="stylesheet">
+    <link href="{{ url_for('static', filename='css/style.css') }}" rel="stylesheet">
+    <style>
+        body {
+            background-color: #f8f9fa;
+        }
+        .connection-card {
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+        .connection-card:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+        }
+        .connection-card.selected {
+            border-color: #0d6efd;
+            box-shadow: 0 0 0 0.25rem rgba(13, 110, 253, 0.25);
+        }
+        .connection-actions {
+            opacity: 0;
+            transition: opacity 0.2s ease;
+        }
+        .connection-card:hover .connection-actions {
+            opacity: 1;
+        }
+    </style>
+</head>
+<body>
+    <div class="container mt-5">
+        <div class="row">
+            <div class="col-12">
+                <!-- 页面标题 -->
+                <div class="text-center mb-5">
+                    <h1 class="display-4">
+                        <i class="fas fa-database text-primary"></i>
+                        数据库连接管理
+                    </h1>
+                    <p class="lead text-muted">管理您的数据库连接</p>
+                </div>
+
+                <div class="row">
+                    <!-- 左侧：连接列表 -->
+                    <div class="col-md-5">
+                        <div class="card mb-4">
+                            <div class="card-header d-flex justify-content-between align-items-center">
+                                <h5 class="mb-0">
+                                    <i class="fas fa-list"></i> 已保存的连接
+                                </h5>
+                                <button type="button" class="btn btn-sm btn-primary" id="addConnectionBtn">
+                                    <i class="fas fa-plus"></i> 添加连接
+                                </button>
+                            </div>
+                            <div class="card-body">
+                                <div class="row" id="connectionsList">
+                                    <!-- 连接卡片将在这里动态生成 -->
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- 右侧：连接配置 -->
+                    <div class="col-md-7">
+                        <div class="card mb-4">
+                            <div class="card-header">
+                                <h5 class="mb-0">
+                                    <i class="fas fa-cog"></i> 连接配置
+                                </h5>
+                            </div>
+                            <div class="card-body">
+                                <form id="dbConfigForm">
+                                    <input type="hidden" id="connectionId">
+                                    
+                                    <div class="row mb-3">
+                                        <div class="col-md-12">
+                                            <label for="connectionName" class="form-label">
+                                                <i class="fas fa-tag"></i> 连接名称
+                                            </label>
+                                            <input type="text" class="form-control" id="connectionName" name="connectionName" placeholder="给连接起个名字..." required>
+                                        </div>
+                                    </div>
+                                    
+                                    <div class="row mb-3">
+                                        <div class="col-md-6">
+                                            <label for="dbType" class="form-label">数据库类型</label>
+                                            <select class="form-select" id="dbType" name="dbType" required>
+                                                <option value="mysql" selected>MySQL</option>
+                                                <option value="sqlserver">SQL Server</option>
+                                            </select>
+                                        </div>
+                                        <div class="col-md-6">
+                                            <label for="port" class="form-label">端口</label>
+                                            <input type="number" class="form-control" id="port" name="port" value="3306" required>
+                                        </div>
+                                    </div>
+                                    
+                                    <div class="row mb-3">
+                                        <div class="col-md-12">
+                                            <label for="host" class="form-label">数据库主机</label>
+                                            <input type="text" class="form-control" id="host" name="host" value="localhost" required>
+                                        </div>
+                                    </div>
+                                    
+                                    <div class="row mb-3">
+                                        <div class="col-md-6">
+                                            <label for="user" class="form-label">用户名</label>
+                                            <input type="text" class="form-control" id="user" name="user" value="root" required>
+                                        </div>
+                                        <div class="col-md-6">
+                                            <label for="password" class="form-label">密码</label>
+                                            <input type="password" class="form-control" id="password" name="password" value="">
+                                        </div>
+                                    </div>
+                                    
+                                    <div class="row mb-3">
+                                        <div class="col-md-12">
+                                            <label for="database" class="form-label">数据库名</label>
+                                            <input type="text" class="form-control" id="database" name="database" placeholder="输入或选择数据库名" required>
+                                        </div>
+                                    </div>
+                                    
+                                    <div class="row mb-3">
+                                        <div class="col-md-12">
+                                            <div class="input-group">
+                                                <button type="button" class="btn btn-primary" id="testConnectionBtn">
+                                                    <i class="fas fa-plug"></i> 测试连接
+                                                </button>
+                                                <button type="button" class="btn btn-success" id="saveConnectionBtn">
+                                                    <i class="fas fa-save"></i> 保存连接
+                                                </button>
+                                                <button type="button" class="btn btn-outline-success" id="connectBtn" disabled>
+                                                    <i class="fas fa-play"></i> 连接
+                                                </button>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </form>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 引入JavaScript库 -->
+    <script src="{{ url_for('static', filename='lib/bootstrap/bootstrap.bundle.min.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/connections.js') }}"></script>
+</body>
+</html>
