@@ -73,6 +73,78 @@ body, html {
     padding: 4px 8px;
 }
 
+#showHistoryPanelBtn {
+    font-size: 11px;
+    padding: 4px 8px;
+    transition: opacity 0.2s ease, background-color 0.2s ease;
+}
+
+#showHistoryPanelBtn:hover {
+    opacity: 0.9;
+    background-color: #0ea5e9 !important;
+}
+
+/* ==================== 左侧历史记录面板 ==================== */
+.diagram-history-panel {
+    flex-shrink: 0;
+    display: flex;
+    flex-direction: column;
+    background: var(--surface);
+}
+
+.diagram-history-panel .list-group-item {
+    border-left: none;
+    border-right: none;
+    padding: 12px 16px;
+    cursor: pointer;
+    transition: background-color 0.15s ease;
+}
+
+.diagram-history-panel .list-group-item:hover {
+    background-color: var(--surface-muted);
+}
+
+.diagram-history-panel .list-group-item.active {
+    background-color: #e0f2fe;
+    border-left: 3px solid var(--brand-600);
+}
+
+.diagram-history-item-title {
+    font-weight: 600;
+    font-size: 14px;
+    color: var(--text);
+    margin-bottom: 4px;
+}
+
+.diagram-history-item-meta {
+    font-size: 12px;
+    color: var(--text-muted);
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 4px;
+}
+
+.diagram-history-item-actions {
+    display: flex;
+    gap: 4px;
+    margin-top: 8px;
+}
+
+.diagram-history-item-actions .btn {
+    font-size: 11px;
+    padding: 2px 8px;
+}
+
+.diagram-history-item-actions {
+    opacity: 0.7;
+    transition: opacity 0.15s ease;
+}
+
+.diagram-history-panel .list-group-item:hover .diagram-history-item-actions {
+    opacity: 1;
+}
+
 /* ==================== 右侧表详情面板 ==================== */
 .table-detail-panel {
     position: absolute;
@@ -138,6 +210,13 @@ body, html {
     flex: 1;
     overflow-y: auto;
     padding: 0;
+    min-height: 0; /* 允许 flex 子元素缩小 */
+    transition: flex 0.3s ease; /* 添加过渡动画 */
+}
+
+/* 当关联关系收起时，字段列表占用约85%的空间 */
+.table-detail-section-relations.collapsed ~ .table-detail-section-columns {
+    flex: 5.67; /* 85% / 15% ≈ 5.67 */
 }
 
 .table-detail-section-title {
@@ -151,6 +230,28 @@ body, html {
     top: 0;
     background: #fff;
     border-bottom: 1px solid var(--border);
+}
+
+.table-detail-section-toggle {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    user-select: none;
+    transition: background-color 0.15s ease;
+}
+
+.table-detail-section-toggle:hover {
+    background-color: var(--surface-muted);
+}
+
+.table-detail-toggle-icon {
+    font-size: 10px;
+    transition: transform 0.2s ease;
+    color: var(--text-muted);
+}
+
+.table-detail-section-toggle.collapsed .table-detail-toggle-icon {
+    transform: rotate(-90deg);
 }
 
 .table-detail-columns {
@@ -191,6 +292,8 @@ body, html {
 
 .table-detail-relations {
     padding: 8px 0;
+    transition: display 0.2s ease;
+    overflow: hidden;
 }
 
 .table-detail-relation-item {

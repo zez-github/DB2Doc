@@ -17,7 +17,7 @@ import json
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 # 导入要测试的模块
-import app
+from app.utils import ai_helper as app
 from openai import OpenAI
 
 
@@ -245,9 +245,6 @@ class TestOpenAIServiceIntegration(unittest.TestCase):
         """测试app.py中的infer_chinese_meaning函数与真实服务的集成"""
         print("\n🔗 测试app.py函数与真实服务的集成...")
         
-        # 临时替换app中的client配置
-        original_client = app.client
-        
         test_configs = [
             "http://localhost:1234/v1",
             "http://127.0.0.1:1234/v1"
@@ -261,32 +258,28 @@ class TestOpenAIServiceIntegration(unittest.TestCase):
                     api_key="sk-no-key-required"
                 )
                 
-                # 临时替换app中的客户端
-                app.client = test_client
-                
-                # 调用真实的函数
-                result = app.infer_chinese_meaning(self.test_columns, self.test_table_name)
-                
-                # 验证结果
-                self.assertIsInstance(result, dict)
-                print(f"✅ 集成测试成功: {base_url}")
-                print(f"📝 推断结果: {result}")
-                
-                # 验证结果包含预期的字段
-                for column_name, _ in self.test_columns:
-                    if column_name in result:
-                        meaning = result[column_name]
-                        self.assertIsInstance(meaning, str)
-                        self.assertLessEqual(len(meaning), 10)
-                
-                break
-                
+                # 使用mock替换get_openai_client函数
+                with patch.object(app, 'get_openai_client', return_value=test_client):
+                    # 调用真实的函数
+                    result = app.infer_chinese_meaning(self.test_columns, self.test_table_name)
+                    
+                    # 验证结果
+                    self.assertIsInstance(result, dict)
+                    print(f"✅ 集成测试成功: {base_url}")
+                    print(f"📝 推断结果: {result}")
+                    
+                    # 验证结果包含预期的字段
+                    for column_name, _ in self.test_columns:
+                        if column_name in result:
+                            meaning = result[column_name]
+                            self.assertIsInstance(meaning, str)
+                            self.assertLessEqual(len(meaning), 10)
+                    
+                    break
+                    
             except Exception as e:
                 print(f"⚠️ 集成测试失败 {base_url}: {str(e)}")
                 continue
-            finally:
-                # 恢复原始客户端
-                app.client = original_client
         else:
             print("⚠️ 没有可用的服务进行集成测试")
     

@@ -33,9 +33,9 @@
                     <button type="button" class="btn btn-outline-primary" id="refreshTablesBtn" title="刷新表列表">
                         <i class="fas fa-sync-alt"></i> 刷新表
                     </button>
-                    <a href="/diagram" class="btn btn-outline-dark" id="openDiagramBtn" title="打开数据库关系图">
+                    <button type="button" class="btn btn-outline-dark" id="openDiagramBtn" title="打开数据库关系图（将使用已选中的表）">
                         <i class="fas fa-project-diagram"></i> 关系图
-                    </a>
+                    </button>
                     <button type="button" class="btn btn-outline-secondary" id="changeConnectionBtn">
                         <i class="fas fa-exchange-alt"></i> 切换连接
                     </button>
@@ -99,9 +99,14 @@
                                     </div>
                                     <div class="d-flex align-items-center gap-2">
                                         <span class="badge bg-secondary" id="tablesTotalBadge">总表 0</span>
+                                        <span class="badge bg-info" id="tablesFilteredBadge" style="display: none;">显示 0</span>
                                         <span class="badge bg-primary" id="tablesSelectedBadge">已选 0</span>
                                         <span class="badge bg-danger" id="tablesMissingBadge">待补充 0</span>
                                     </div>
+                                </div>
+                                <div class="alert alert-info p-2 mb-2 small" role="alert">
+                                    <i class="fas fa-info-circle"></i>
+                                    <strong>提示：</strong>选择表后点击"关系图"按钮，将仅绘制选中的表。建议选择核心表（通常10-30张），避免图表过大导致渲染失败。
                                 </div>
                                 <div class="form-check form-switch mb-2">
                                     <input class="form-check-input" type="checkbox" id="filterMissingOnly">

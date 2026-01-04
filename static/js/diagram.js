@@ -5,6 +5,7 @@ class DatabaseDiagram {
         this.tablesData = null;
         this.relationships = null;
         this.insights = null;  // 数据洞察
+        this.currentOptions = null;  // 当前配置选项
         // 缩放和平移状态
         this.zoom = 1;
         this.panX = 0;
@@ -23,6 +24,8 @@ class DatabaseDiagram {
         this.bindZoomPanEvents();
         this.initMermaid();
         this.loadGraph();
+        // 初始化历史记录面板显示状态（默认隐藏）
+        this.hideHistoryPanel();
     }
 
     initMermaid() {
@@ -56,6 +59,9 @@ class DatabaseDiagram {
         const reloadBtn = document.getElementById('diagramReloadBtn');
         if (reloadBtn) reloadBtn.addEventListener('click', () => this.loadGraph());
 
+        const saveBtn = document.getElementById('diagramSaveBtn');
+        if (saveBtn) saveBtn.addEventListener('click', () => this.saveDiagram());
+
         const exportBtn = document.getElementById('diagramExportPngBtn');
         if (exportBtn) exportBtn.addEventListener('click', () => this.exportPng());
 
@@ -79,6 +85,19 @@ class DatabaseDiagram {
             threshold.addEventListener('change', () => this.loadGraph());
             update();
         }
+
+        // 历史记录面板相关事件
+        const toggleHistoryBtn = document.getElementById('toggleHistoryPanelBtn');
+        if (toggleHistoryBtn) toggleHistoryBtn.addEventListener('click', () => this.hideHistoryPanel());
+
+        const showHistoryBtn = document.getElementById('showHistoryPanelBtn');
+        if (showHistoryBtn) showHistoryBtn.addEventListener('click', () => this.showHistoryPanel());
+
+        const clearHistoryBtn = document.getElementById('clearHistoryBtn');
+        if (clearHistoryBtn) clearHistoryBtn.addEventListener('click', () => this.clearHistory());
+
+        // 初始化历史记录列表
+        this.renderHistoryList();
     }
 
     bindZoomPanEvents() {
@@ -191,6 +210,17 @@ class DatabaseDiagram {
         const useLLM = document.getElementById('diagramUseLLM');
         const thresholdEl = document.getElementById('diagramThreshold');
 
+        // 从 sessionStorage 读取选中的表列表
+        let selectedTables = null;
+        const storedTables = sessionStorage.getItem('diagramSelectedTables');
+        if (storedTables) {
+            try {
+                selectedTables = JSON.parse(storedTables);
+            } catch (e) {
+                console.warn('[Diagram] 无法解析存储的表列表:', e);
+            }
+        }
+
         const payload = {
             ...this.currentConnection,
             options: {
@@ -198,6 +228,7 @@ class DatabaseDiagram {
                 include_inferred: !!(showInferred && showInferred.checked),
                 use_llm: !!(useLLM && useLLM.checked),
                 threshold: thresholdEl ? Number(thresholdEl.value || 0.6) : 0.6,
+                tables: selectedTables,  // 传递选中的表列表
             }
         };
 
@@ -220,6 +251,7 @@ class DatabaseDiagram {
         this.tablesData = result.tables;
         this.relationships = result.relationships;
         this.insights = result.insights;  // 保存洞察数据
+        this.currentOptions = payload.options;  // 保存当前配置
         this.renderGraph(result.mermaid, result.stats);
     }
 
@@ -581,6 +613,16 @@ class DatabaseDiagram {
                 const entityBox = node.querySelector('.entityBox');
                 if (entityBox) {
                     entityBox.style.filter = '';
+                    // 恢复原始边框样式（如果有）
+                    const originalStroke = entityBox.dataset.originalStroke;
+                    const originalStrokeWidth = entityBox.dataset.originalStrokeWidth;
+                    if (originalStroke !== undefined) {
+                        entityBox.setAttribute('stroke', originalStroke || '#000');
+                        entityBox.setAttribute('stroke-width', originalStrokeWidth || '1');
+                        // 清除保存的原始样式数据，以便下次搜索时重新保存
+                        delete entityBox.dataset.originalStroke;
+                        delete entityBox.dataset.originalStrokeWidth;
+                    }
                 }
             });
             return;
@@ -589,13 +631,25 @@ class DatabaseDiagram {
         // 匹配的表名集合
         const matchedTables = new Set();
 
-        // 高亮包含搜索词的表名，其他变淡
+        // 高亮包含搜索词的表名或字段名，其他变淡
         allTableNodes.forEach(node => {
             const tableName = node.dataset.tableName || '';
             const tableInfo = node.dataset.tableInfo ? JSON.parse(node.dataset.tableInfo) : {};
             
-            // 搜索表名和注释
-            const searchText = `${tableName} ${tableInfo.comment || ''}`.toLowerCase();
+            // 获取表数据（包含字段信息）
+            const tableData = this.tablesData && this.tablesData[tableName];
+            
+            // 构建搜索文本：表名 + 注释 + 所有字段名
+            let searchText = `${tableName} ${tableInfo.comment || ''}`.toLowerCase();
+            
+            // 添加字段名到搜索文本
+            if (tableData && tableData.columns) {
+                const fieldNames = tableData.columns.map(col => {
+                    // col 格式: [column_name, data_type, comment] 或 [column_name, data_type]
+                    return col[0] || '';
+                }).filter(name => name).join(' ');
+                searchText += ' ' + fieldNames.toLowerCase();
+            }
             
             const entityBox = node.querySelector('.entityBox');
             
@@ -603,6 +657,11 @@ class DatabaseDiagram {
                 // 匹配：高亮显示
                 node.style.opacity = '1';
                 if (entityBox) {
+                    // 保存原始样式（如果还没有保存）
+                    if (entityBox.dataset.originalStroke === undefined) {
+                        entityBox.dataset.originalStroke = entityBox.getAttribute('stroke') || '#000';
+                        entityBox.dataset.originalStrokeWidth = entityBox.getAttribute('stroke-width') || '1';
+                    }
                     entityBox.setAttribute('stroke', '#2563eb');
                     entityBox.setAttribute('stroke-width', '3');
                     entityBox.style.filter = 'drop-shadow(0 0 6px rgba(37, 99, 235, 0.6))';
@@ -613,6 +672,13 @@ class DatabaseDiagram {
                 node.style.opacity = '0.25';
                 if (entityBox) {
                     entityBox.style.filter = '';
+                    // 恢复原始边框样式（如果有）
+                    const originalStroke = entityBox.dataset.originalStroke;
+                    const originalStrokeWidth = entityBox.dataset.originalStrokeWidth;
+                    if (originalStroke !== undefined) {
+                        entityBox.setAttribute('stroke', originalStroke || '#000');
+                        entityBox.setAttribute('stroke-width', originalStrokeWidth || '1');
+                    }
                 }
             }
         });
@@ -740,11 +806,87 @@ class DatabaseDiagram {
             relationsListEl.innerHTML = '<div class="table-detail-empty">无关联关系</div>';
         }
         
+        // 绑定关联关系收起/展开事件
+        this.bindRelationsToggle();
+        
         // 打开面板
         panel.classList.add('open');
         
         // 高亮当前选中的表
         this.highlightSelectedTable(tableName);
+    }
+    
+    /**
+     * 绑定关联关系收起/展开事件
+     */
+    bindRelationsToggle() {
+        const titleEl = document.getElementById('detailRelationsTitle');
+        const contentEl = document.getElementById('detailRelationsList');
+        const relationsSection = document.getElementById('detailRelationsSection');
+        const columnsSection = document.getElementById('detailColumnsSection');
+        const iconEl = document.getElementById('detailRelationsToggleIcon');
+        
+        if (!titleEl || !contentEl) return;
+        
+        // 如果已经绑定过事件，先移除
+        if (titleEl.dataset.bound === 'true') {
+            return;
+        }
+        
+        // 标记已绑定
+        titleEl.dataset.bound = 'true';
+        
+        // 更新布局的函数
+        const updateLayout = (isCollapsed) => {
+            if (isCollapsed) {
+                // 收起：字段列表占用约85%的空间
+                if (relationsSection) {
+                    relationsSection.classList.add('collapsed');
+                }
+                if (columnsSection) {
+                    columnsSection.style.flex = '5.67'; // 85% / 15% ≈ 5.67
+                }
+            } else {
+                // 展开：恢复平均分配
+                if (relationsSection) {
+                    relationsSection.classList.remove('collapsed');
+                }
+                if (columnsSection) {
+                    columnsSection.style.flex = '1';
+                }
+            }
+        };
+        
+        // 绑定点击事件
+        titleEl.addEventListener('click', () => {
+            const isCollapsed = contentEl.style.display === 'none' || contentEl.style.display === '';
+            
+            if (isCollapsed) {
+                // 展开
+                contentEl.style.display = 'block';
+                titleEl.classList.remove('collapsed');
+                if (iconEl) {
+                    iconEl.style.transform = 'rotate(0deg)';
+                }
+                updateLayout(false);
+            } else {
+                // 收起
+                contentEl.style.display = 'none';
+                titleEl.classList.add('collapsed');
+                if (iconEl) {
+                    iconEl.style.transform = 'rotate(-90deg)';
+                }
+                updateLayout(true);
+            }
+        });
+        
+        // 默认收起状态
+        contentEl.style.display = 'none';
+        titleEl.classList.add('collapsed');
+        if (iconEl) {
+            iconEl.style.transform = 'rotate(-90deg)';
+        }
+        updateLayout(true);
     }
 
     /**
@@ -799,9 +941,283 @@ class DatabaseDiagram {
         });
     }
 
+    // ==================== 历史记录管理 ====================
+    
+    /**
+     * 保存当前关系图
+     */
+    saveDiagram() {
+        if (!this.mermaidData || !this.tablesData) {
+            alert('没有可保存的关系图数据');
+            return;
+        }
+
+        const history = this.getHistory();
+        const timestamp = new Date().toISOString();
+        const connectionKey = this.getConnectionKey();
+        
+        const entry = {
+            id: `diagram_${Date.now()}`,
+            timestamp: timestamp,
+            connection: {
+                host: this.currentConnection.host,
+                port: this.currentConnection.port,
+                database: this.currentConnection.database,
+                db_type: this.currentConnection.db_type,
+            },
+            connectionKey: connectionKey,
+            options: this.currentOptions || {},
+            mermaid: this.mermaidData,
+            tables: this.tablesData,
+            relationships: this.relationships || [],
+            insights: this.insights || {},
+            stats: {
+                tables_count: Object.keys(this.tablesData || {}).length,
+                relationships_count: (this.relationships || []).length,
+            }
+        };
+
+        // 添加到历史记录开头
+        history.unshift(entry);
+        
+        // 限制历史记录数量（最多保留50条）
+        if (history.length > 50) {
+            history.splice(50);
+        }
+
+        this.saveHistory(history);
+        this.renderHistoryList();
+        
+        // 显示成功消息
+        const statsEl = document.getElementById('diagramStats');
+        if (statsEl) {
+            const originalText = statsEl.textContent;
+            statsEl.textContent = '已保存';
+            statsEl.style.color = '#16a34a';
+            setTimeout(() => {
+                statsEl.textContent = originalText;
+                statsEl.style.color = '';
+            }, 2000);
+        }
+    }
+
+    /**
+     * 加载历史记录
+     */
+    loadHistoryEntry(entryId) {
+        const history = this.getHistory();
+        const entry = history.find(e => e.id === entryId);
+        
+        if (!entry) {
+            alert('历史记录不存在');
+            return;
+        }
+
+        // 检查连接是否匹配
+        const currentKey = this.getConnectionKey();
+        if (entry.connectionKey !== currentKey) {
+            if (!confirm(`此历史记录来自不同的数据库连接。\n\n当前: ${currentKey}\n历史: ${entry.connectionKey}\n\n是否仍要加载？`)) {
+                return;
+            }
+        }
+
+        // 恢复数据
+        this.mermaidData = entry.mermaid;
+        this.tablesData = entry.tables;
+        this.relationships = entry.relationships;
+        this.insights = entry.insights;
+        this.currentOptions = entry.options;
+
+        // 恢复配置选项
+        const showInferred = document.getElementById('diagramShowInferred');
+        const useLLM = document.getElementById('diagramUseLLM');
+        const thresholdEl = document.getElementById('diagramThreshold');
+        
+        if (showInferred && entry.options.include_inferred !== undefined) {
+            showInferred.checked = entry.options.include_inferred;
+        }
+        if (useLLM && entry.options.use_llm !== undefined) {
+            useLLM.checked = entry.options.use_llm;
+        }
+        if (thresholdEl && entry.options.threshold !== undefined) {
+            thresholdEl.value = entry.options.threshold;
+            const thresholdValue = document.getElementById('diagramThresholdValue');
+            if (thresholdValue) {
+                thresholdValue.textContent = Number(entry.options.threshold).toFixed(2);
+            }
+        }
+
+        // 渲染图表
+        this.renderGraph(entry.mermaid, entry.stats);
+        
+        // 更新历史记录列表的选中状态
+        this.renderHistoryList();
+        
+        // 显示加载成功消息
+        const statsEl = document.getElementById('diagramStats');
+        if (statsEl) {
+            statsEl.textContent = '已加载历史记录';
+            setTimeout(() => {
+                if (entry.stats) {
+                    statsEl.textContent = `${entry.stats.tables_count} 表, ${entry.stats.relationships_count} 关系`;
+                }
+            }, 2000);
+        }
+    }
+
+    /**
+     * 删除历史记录
+     */
+    deleteHistoryEntry(entryId, event) {
+        if (event) {
+            event.stopPropagation();
+        }
+        
+        if (!confirm('确定要删除这条历史记录吗？')) {
+            return;
+        }
+
+        const history = this.getHistory();
+        const filtered = history.filter(e => e.id !== entryId);
+        this.saveHistory(filtered);
+        this.renderHistoryList();
+    }
+
+    /**
+     * 清空所有历史记录
+     */
+    clearHistory() {
+        if (!confirm('确定要清空所有历史记录吗？此操作不可恢复。')) {
+            return;
+        }
+
+        this.saveHistory([]);
+        this.renderHistoryList();
+    }
+
+    /**
+     * 显示历史记录面板
+     */
+    showHistoryPanel() {
+        const panel = document.getElementById('diagramHistoryPanel');
+        const showBtn = document.getElementById('showHistoryPanelBtn');
+        
+        if (panel) {
+            panel.style.display = 'flex';
+        }
+        if (showBtn) {
+            showBtn.style.display = 'none';
+        }
+        
+        this.renderHistoryList();
+    }
+
+    /**
+     * 隐藏历史记录面板
+     */
+    hideHistoryPanel() {
+        const panel = document.getElementById('diagramHistoryPanel');
+        const showBtn = document.getElementById('showHistoryPanelBtn');
+        
+        if (panel) {
+            panel.style.display = 'none';
+        }
+        if (showBtn) {
+            showBtn.style.display = 'inline-block';
+        }
+    }
+
+    /**
+     * 渲染历史记录列表
+     */
+    renderHistoryList() {
+        const container = document.getElementById('diagramHistoryList');
+        if (!container) return;
+
+        const history = this.getHistory();
+        const currentKey = this.getConnectionKey();
+
+        if (history.length === 0) {
+            container.innerHTML = '<div class="p-3 text-center text-muted small">暂无历史记录</div>';
+            return;
+        }
+
+        container.innerHTML = history.map(entry => {
+            const date = new Date(entry.timestamp);
+            const dateStr = date.toLocaleString('zh-CN', {
+                year: 'numeric',
+                month: '2-digit',
+                day: '2-digit',
+                hour: '2-digit',
+                minute: '2-digit'
+            });
+            
+            const isCurrentConnection = entry.connectionKey === currentKey;
+            const connectionInfo = isCurrentConnection 
+                ? `${entry.connection.database}` 
+                : `${entry.connection.host}:${entry.connection.port}/${entry.connection.database}`;
+
+            return `
+                <div class="list-group-item ${isCurrentConnection ? 'active' : ''}" data-entry-id="${entry.id}" 
+                     onclick="if(event.target.closest('.diagram-history-item-actions')) return; window.diagramInstance.loadHistoryEntry('${entry.id}')">
+                    <div class="diagram-history-item-title">
+                        ${isCurrentConnection ? '<i class="fas fa-check-circle text-success"></i> ' : ''}${connectionInfo}
+                    </div>
+                    <div class="diagram-history-item-meta">
+                        <span><i class="fas fa-calendar"></i> ${dateStr}</span>
+                        <span><i class="fas fa-table"></i> ${entry.stats?.tables_count || 0} 表</span>
+                        <span><i class="fas fa-link"></i> ${entry.stats?.relationships_count || 0} 关系</span>
+                        ${entry.options.include_inferred ? '<span class="badge bg-info">推断</span>' : ''}
+                        ${entry.options.use_llm ? '<span class="badge bg-purple">LLM</span>' : ''}
+                    </div>
+                    <div class="diagram-history-item-actions">
+                        <button class="btn btn-sm btn-outline-primary" onclick="event.stopPropagation(); window.diagramInstance.loadHistoryEntry('${entry.id}')" title="加载">
+                            <i class="fas fa-upload"></i> 加载
+                        </button>
+                        <button class="btn btn-sm btn-outline-danger" onclick="event.stopPropagation(); window.diagramInstance.deleteHistoryEntry('${entry.id}', event)" title="删除">
+                            <i class="fas fa-trash"></i> 删除
+                        </button>
+                    </div>
+                </div>
+            `;
+        }).join('');
+    }
+
+    /**
+     * 获取连接的唯一标识
+     */
+    getConnectionKey() {
+        if (!this.currentConnection) return '';
+        return `${this.currentConnection.db_type}_${this.currentConnection.host}_${this.currentConnection.port}_${this.currentConnection.database}`;
+    }
+
+    /**
+     * 获取历史记录
+     */
+    getHistory() {
+        try {
+            const raw = localStorage.getItem('diagramHistory');
+            return raw ? JSON.parse(raw) : [];
+        } catch {
+            return [];
+        }
+    }
+
+    /**
+     * 保存历史记录
+     */
+    saveHistory(history) {
+        try {
+            localStorage.setItem('diagramHistory', JSON.stringify(history));
+        } catch (e) {
+            console.error('保存历史记录失败:', e);
+            alert('保存历史记录失败，可能是存储空间不足');
+        }
+    }
+
 }
 
 // 页面加载完成后初始化
 document.addEventListener('DOMContentLoaded', () => {
-    new DatabaseDiagram();
+    window.diagramInstance = new DatabaseDiagram();
 });

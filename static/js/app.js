@@ -242,6 +242,32 @@ class DatabaseDocGenerator {
         }
     }
 
+    // 打开关系图页面
+    openDiagram() {
+        // 获取选中的表列表
+        const selectedTables = Array.from(this.selectedTables);
+        
+        if (selectedTables.length === 0) {
+            // 如果没有选中任何表，提示用户
+            const confirmMsg = '您还没有选择任何表。\n\n' +
+                '• 点击"确定"将使用所有表生成关系图（可能因表过多而失败）\n' +
+                '• 点击"取消"返回主界面选择表后再试\n\n' +
+                '提示：建议先选择部分表（如核心表），避免图表过大导致渲染失败。';
+            
+            if (!confirm(confirmMsg)) {
+                return;
+            }
+            // 使用所有表
+            sessionStorage.removeItem('diagramSelectedTables');
+        } else {
+            // 存储选中的表列表到 sessionStorage
+            sessionStorage.setItem('diagramSelectedTables', JSON.stringify(selectedTables));
+        }
+        
+        // 跳转到关系图页面
+        window.location.href = '/diagram';
+    }
+
     // 显示当前连接信息
     displayCurrentConnectionInfo() {
         const connectionInfoDiv = document.getElementById('currentConnectionInfo');
@@ -281,6 +307,14 @@ class DatabaseDocGenerator {
         document.getElementById('refreshTablesBtn').addEventListener('click', () => {
             this.getTablesList();
         });
+        
+        // 关系图按钮
+        const openDiagramBtn = document.getElementById('openDiagramBtn');
+        if (openDiagramBtn) {
+            openDiagramBtn.addEventListener('click', () => {
+                this.openDiagram();
+            });
+        }
         
         // 右侧面板折叠按钮
         const collapseRightBtn = document.getElementById('collapseRightBtn');
@@ -785,6 +819,8 @@ class DatabaseDocGenerator {
         const searchTerm = (this.tableSearchTerm || '').trim();
 
         const tableItems = document.querySelectorAll('#tablesContainer .list-group-item');
+        let visibleCount = 0;
+        
         tableItems.forEach(item => {
             const tableName = (item.dataset.tableName || '').toLowerCase();
             const isMissing = item.dataset.missingDesc === '1';
@@ -792,8 +828,31 @@ class DatabaseDocGenerator {
             const matchSearch = !searchTerm || tableName.includes(searchTerm);
             const matchMissing = !missingOnly || isMissing;
 
-            item.style.display = (matchSearch && matchMissing) ? 'block' : 'none';
+            const isVisible = matchSearch && matchMissing;
+            item.style.display = isVisible ? 'block' : 'none';
+            
+            if (isVisible) {
+                visibleCount++;
+            }
         });
+        
+        // 更新搜索后的表数量显示
+        this.updateFilteredTablesCount(visibleCount, searchTerm, missingOnly);
+    }
+    
+    updateFilteredTablesCount(visibleCount, searchTerm, missingOnly) {
+        const filteredBadge = document.getElementById('tablesFilteredBadge');
+        if (!filteredBadge) return;
+        
+        // 如果有搜索条件或筛选条件，显示 badge
+        const hasFilter = (searchTerm && searchTerm.length > 0) || missingOnly;
+        
+        if (hasFilter) {
+            filteredBadge.style.display = 'inline-block';
+            filteredBadge.textContent = `显示 ${visibleCount}`;
+        } else {
+            filteredBadge.style.display = 'none';
+        }
     }
 
     updateTablesStats() {
@@ -1356,30 +1415,62 @@ class DatabaseDocGenerator {
 
     // 全选表
     selectAllTables() {
-        const checkboxes = document.querySelectorAll('#tablesContainer input[type="checkbox"]');
-        checkboxes.forEach(checkbox => {
-            checkbox.checked = true;
-            const item = checkbox.closest('.list-group-item');
-            const name = item?.dataset?.tableName || checkbox.value;
-            this.selectedTables.add(name);
-            item && item.classList.add('selected');
+        // 只选择当前显示的表（经过搜索和筛选后的表）
+        const tableItems = document.querySelectorAll('#tablesContainer .list-group-item');
+        let selectedCount = 0;
+        
+        tableItems.forEach(item => {
+            // 只处理可见的表项
+            if (item.style.display !== 'none') {
+                const checkbox = item.querySelector('input[type="checkbox"]');
+                if (checkbox && !checkbox.checked) {
+                    checkbox.checked = true;
+                    const name = item.dataset.tableName || checkbox.value;
+                    this.selectedTables.add(name);
+                    item.classList.add('selected');
+                    selectedCount++;
+                }
+            }
         });
+        
         this.updateGenerateButton();
         this.updateTablesStats();
+        
+        if (selectedCount > 0) {
+            this.showMessage(`已选择 ${selectedCount} 张显示的表`, 'success');
+        } else {
+            this.showMessage('所有显示的表已全部选中', 'info');
+        }
     }
 
-    // 取消全选
+    // 取消全选（仅取消当前显示的表）
     deselectAllTables() {
-        const checkboxes = document.querySelectorAll('#tablesContainer input[type="checkbox"]');
-        checkboxes.forEach(checkbox => {
-            checkbox.checked = false;
-            const item = checkbox.closest('.list-group-item');
-            const name = item?.dataset?.tableName || checkbox.value;
-            this.selectedTables.delete(name);
-            item && item.classList.remove('selected');
+        // 只取消选择当前显示的表（经过搜索和筛选后的表）
+        const tableItems = document.querySelectorAll('#tablesContainer .list-group-item');
+        let deselectedCount = 0;
+        
+        tableItems.forEach(item => {
+            // 只处理可见的表项
+            if (item.style.display !== 'none') {
+                const checkbox = item.querySelector('input[type="checkbox"]');
+                if (checkbox && checkbox.checked) {
+                    checkbox.checked = false;
+                    const name = item.dataset.tableName || checkbox.value;
+                    this.selectedTables.delete(name);
+                    item.classList.remove('selected');
+                    deselectedCount++;
+                }
+            }
         });
+        
         this.updateGenerateButton();
         this.updateTablesStats();
+        
+        if (deselectedCount > 0) {
+            this.showMessage(`已取消选择 ${deselectedCount} 张显示的表`, 'info');
+        } else {
+            this.showMessage('没有已选中的显示表', 'info');
+        }
     }
 
     // 更新生成按钮状态
